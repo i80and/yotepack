@@ -1,35 +1,7 @@
-// use std::fs;
-// use std::fs::OpenOptions;
-// use std::io;
-use std::io::Read;
-// use std::path::Path;
-
-// use anyhow::Context;
-
-// pub fn read_or_create_atomic<F>(path: &Path, default_fn: F) -> anyhow::Result<String>
-// where
-//     F: FnOnce() -> anyhow::Result<String>,
-// {
-//     // Try to create exclusively (fails if exists)
-//     match OpenOptions::new()
-//         .write(true)
-//         .create_new(true) // Fails if file exists
-//         .open(path)
-//     {
-//         Ok(mut file) => {
-//             // File was created, write default
-//             let contents = default_fn()?;
-//             file.write_all(contents.as_bytes())?;
-//             Ok(contents)
-//         }
-//         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-//             // File exists, read it
-//             let file = fs::File::open(path)?;
-//             io::read_to_string(file).with_context(|| "Read error")
-//         }
-//         Err(e) => Err(e.into()),
-//     }
-// }
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 pub fn read_retry_on_intr<'a, R: Read>(
     reader: &mut R,
@@ -48,4 +20,53 @@ pub fn read_retry_on_intr<'a, R: Read>(
     }
 
     Ok(&mut out[..total])
+}
+
+pub struct MultiWriter<W: Write> {
+    writers: Vec<W>,
+}
+
+impl<W: Write> MultiWriter<W> {
+    pub fn new(writers: Vec<W>) -> Self {
+        MultiWriter { writers }
+    }
+}
+
+impl<W: Write> Write for MultiWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for w in &mut self.writers {
+            w.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        for w in &mut self.writers {
+            w.flush()?;
+        }
+        Ok(())
+    }
+}
+
+pub fn sync_paths<I, P>(paths: I) -> std::io::Result<()>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    for path in paths {
+        let file = std::fs::File::open(path.as_ref())?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
+pub fn ignore_errorkind(
+    result: std::io::Result<()>,
+    kind: std::io::ErrorKind,
+) -> std::io::Result<()> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == kind => Ok(()),
+        Err(e) => Err(e),
+    }
 }

@@ -60,6 +60,10 @@ fn main() -> anyhow::Result<()> {
             let mut out_buf = vec![];
             engine.get(Utf8Path::new("foobar"), &mut out_buf)?;
             assert_eq!(out_buf, b"hello world");
+            assert_eq!(
+                engine.list(Utf8Path::new("foobar"))?,
+                vec![Utf8Path::new("foobar")]
+            );
         }
         Commands::Resize { disks } => {
             println!("Resizing with disks: {:?}", disks);

@@ -15,11 +15,15 @@ clap = { version = "4.5.57", features = ["derive"] }
 dashmap = "6.1.0"
 derive = "1.0.0"
 features = "0.10.0"
+log = "0.4.29"
+parking_lot = "0.12.5"
+percent-encoding = "2.3.2"
 reed-solomon-simd = "3.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 threadpool = "1.8.1"
 toml = "0.9.11"
 uuid = { version = "1.20.0", features = ["rng-getrandom", "serde", "v4"] }
+walkdir = "2.5.0"
 xattr = "1.6.1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zstd = { version = "0.13.3", features = ["fat-lto"] }

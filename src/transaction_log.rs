@@ -95,7 +95,7 @@ pub struct LogEntry {
 pub struct TransactionLogIterator<'a, R: Read> {
     buf: Vec<u8>,
     errored: bool,
-    reader: std::sync::MutexGuard<'a, R>,
+    reader: &'a mut R,
 }
 
 impl<'a, R: Read> Iterator for TransactionLogIterator<'a, R> {
@@ -107,7 +107,7 @@ impl<'a, R: Read> Iterator for TransactionLogIterator<'a, R> {
         }
 
         let result = (|| -> anyhow::Result<Option<LogEntry>> {
-            if read_segment_trailer(&mut *self.reader, &mut self.buf)?.is_none() {
+            if read_segment_trailer(&mut self.reader, &mut self.buf)?.is_none() {
                 return Ok(None);
             }
 
@@ -137,7 +137,7 @@ impl<'a, R: Read> Iterator for TransactionLogIterator<'a, R> {
 #[derive(Debug)]
 pub struct TransactionLog {
     path: PathBuf,
-    file: std::sync::Mutex<std::fs::File>,
+    file: std::fs::File,
 }
 
 impl TransactionLog {
@@ -150,13 +150,16 @@ impl TransactionLog {
             .open(&path)?;
         file.try_lock()
             .with_context(|| "Transaction log already locked")?;
-        Ok(Self {
-            path,
-            file: std::sync::Mutex::new(file),
-        })
+        Ok(Self { path, file })
     }
 
-    pub fn append(&self, ty: WalType, txid: u64, key: &str, state: WalState) -> anyhow::Result<()> {
+    pub fn append(
+        &mut self,
+        ty: WalType,
+        txid: u64,
+        key: &str,
+        state: WalState,
+    ) -> anyhow::Result<()> {
         let mut message = ::capnp::message::Builder::new_default();
 
         let mut log_entry = message.init_root::<txnlog_capnp::transaction_log_entry::Builder>();
@@ -168,36 +171,37 @@ impl TransactionLog {
         let mut message_buf = Vec::new();
         capnp::serialize::write_message(&mut message_buf, &message)?;
 
-        let mut file_guard = self.file.lock().unwrap();
-        (*file_guard).seek(std::io::SeekFrom::End(0))?;
+        self.file.seek(std::io::SeekFrom::End(0))?;
 
         {
-            let writer = std::io::BufWriter::new(&*file_guard);
+            let writer = std::io::BufWriter::new(&mut self.file);
             write_segment_trailer(writer, &message_buf)?;
         }
 
-        file_guard.sync_all()?;
-
         Ok(())
     }
 
-    pub fn iterate(&self) -> anyhow::Result<TransactionLogIterator<'_, std::fs::File>> {
-        let mut file_guard = self.file.lock().unwrap();
-        (*file_guard).rewind()?;
+    pub fn iterate(&mut self) -> anyhow::Result<TransactionLogIterator<'_, std::fs::File>> {
+        self.file.rewind()?;
         Ok(TransactionLogIterator {
             buf: Vec::new(),
             errored: false,
-            reader: file_guard,
+            reader: &mut self.file,
         })
     }
 
-    pub fn clear(&self) -> anyhow::Result<()> {
-        let mut file_guard = self.file.lock().unwrap();
-        file_guard.rewind()?;
-        file_guard.set_len(0)?;
-        file_guard.sync_all()?;
+    pub fn clear(&mut self) -> anyhow::Result<()> {
+        self.file.rewind()?;
+        self.file.set_len(0)?;
+        self.file.sync_data()?;
 
         Ok(())
+    }
+
+    pub fn fsync(&self) -> anyhow::Result<()> {
+        self.file
+            .sync_data()
+            .with_context(|| "Failed to fsync transaction log")
     }
 }
 
@@ -233,7 +237,7 @@ mod tests {
     fn test_iterate_empty_log() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path).unwrap();
+        let mut log = TransactionLog::new(log_path).unwrap();
 
         let mut iter = log.iterate().unwrap();
         assert!(iter.next().is_none());
@@ -243,7 +247,7 @@ mod tests {
     fn test_append_and_iterate_multiple_entries() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path).unwrap();
+        let mut log = TransactionLog::new(log_path).unwrap();
 
         let entries = vec![
             (WalType::Write, "key1", WalState::Prepared),
@@ -270,7 +274,7 @@ mod tests {
     fn test_clear_empty_log() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path.clone()).unwrap();
+        let mut log = TransactionLog::new(log_path.clone()).unwrap();
 
         log.clear().unwrap();
 
@@ -282,7 +286,7 @@ mod tests {
     fn test_clear_with_entries() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path.clone()).unwrap();
+        let mut log = TransactionLog::new(log_path.clone()).unwrap();
 
         log.append(WalType::Write, 0, "key1", WalState::Prepared)
             .unwrap();
@@ -304,7 +308,7 @@ mod tests {
     fn test_append_after_clear() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path.clone()).unwrap();
+        let mut log = TransactionLog::new(log_path.clone()).unwrap();
 
         log.append(WalType::Write, 0, "old_key", WalState::Prepared)
             .unwrap();
@@ -323,7 +327,7 @@ mod tests {
     fn test_append_with_special_characters() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path).unwrap();
+        let mut log = TransactionLog::new(log_path).unwrap();
 
         let special_keys = vec![
             "key with spaces",
@@ -346,40 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_appends() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let dir = tempdir().unwrap();
-        let log_path = dir.path().join("test.log");
-        let log = Arc::new(TransactionLog::new(log_path).unwrap());
-
-        let mut handles = vec![];
-        for i in 0..10 {
-            let log_clone = Arc::clone(&log);
-            let handle = thread::spawn(move || {
-                log_clone
-                    .append(WalType::Write, 0, &format!("key_{}", i), WalState::Prepared)
-                    .unwrap();
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        // Should have 10 entries (order may vary)
-        let log_mut = Arc::try_unwrap(log).unwrap();
-        let iter = log_mut.iterate().unwrap();
-        assert_eq!(iter.count(), 10);
-    }
-
-    #[test]
     fn test_detect_corruption() {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("test.log");
-        let log = TransactionLog::new(log_path.clone()).unwrap();
+        let mut log = TransactionLog::new(log_path.clone()).unwrap();
 
         let keys = vec!["key 1", "key 2", "key 3"];
 

@@ -1,42 +1,40 @@
-use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{ErrorKind, Read, Write};
-use std::iter::repeat_with;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 
+use parking_lot::{Mutex, RwLock};
+
 use crate::fsutil;
-use crate::transaction_log;
+use crate::transaction_log::{self, TransactionLog};
 use anyhow::{Context, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 const MIN_DISKS: usize = 3;
-const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
-const NUM_LOCKS: usize = 1024;
+const MARKER_FILENAME: &str = "yote.marker";
 
-struct LockPool {
-    locks: Vec<Mutex<()>>,
+const PERCENT_ENCODE_SET: percent_encoding::AsciiSet = percent_encoding::AsciiSet::EMPTY.add(b'.');
+
+fn clean_key(key: &Utf8Path) -> Utf8PathBuf {
+    key.components()
+        .map(|component| {
+            percent_encoding::utf8_percent_encode(component.as_str(), &PERCENT_ENCODE_SET)
+                .to_string()
+        })
+        .collect()
 }
 
-impl LockPool {
-    fn new() -> Self {
-        Self {
-            locks: Vec::from_iter(repeat_with(|| Mutex::new(())).take(NUM_LOCKS)),
-        }
+fn unclean_key(key: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
+    let mut out = Utf8PathBuf::new();
+
+    for component in key.components() {
+        let decoded = percent_encoding::percent_decode_str(component.as_str()).decode_utf8()?;
+        out.push(decoded.as_ref());
     }
 
-    fn get_lock<K>(&self, key: &K) -> &Mutex<()>
-    where
-        K: Hash,
-    {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        &self.locks[(hasher.finish() as usize) % self.locks.len()]
-    }
+    Ok(out)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -50,16 +48,18 @@ struct Disk {
     path: PathBuf,
     uuid: uuid::Uuid,
     pack: Vec<uuid::Uuid>,
-    transaction_log: transaction_log::TransactionLog,
 }
 
 type TxnId = u64;
 
 impl Disk {
-    pub fn create(path: PathBuf, uuid: uuid::Uuid, pack: Vec<uuid::Uuid>) -> anyhow::Result<Self> {
+    pub fn create(
+        path: PathBuf,
+        uuid: uuid::Uuid,
+        pack: Vec<uuid::Uuid>,
+    ) -> anyhow::Result<(Self, TransactionLog)> {
         fs::create_dir_all(&path)?;
         fs::create_dir(path.join("wip"))?;
-        fs::create_dir(path.join("backup"))?;
         fs::create_dir(path.join("objects"))?;
 
         let config_text = toml::to_string_pretty(&DiskConfig {
@@ -77,15 +77,10 @@ impl Disk {
 
         let transaction_log = transaction_log::TransactionLog::new(path.join("wal"))?;
 
-        Ok(Disk {
-            path,
-            uuid,
-            pack,
-            transaction_log,
-        })
+        Ok((Disk { path, uuid, pack }, transaction_log))
     }
 
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
+    pub fn load(path: PathBuf) -> anyhow::Result<(Self, TransactionLog)> {
         let config_text = std::fs::read_to_string(path.join("config.toml"))?;
         let config: DiskConfig = toml::from_str(&config_text)?;
         let transaction_log = transaction_log::TransactionLog::new(path.join("wal"))?;
@@ -94,45 +89,72 @@ impl Disk {
             path,
             uuid: config.uuid,
             pack: config.pack,
-            transaction_log,
         };
 
-        Ok(disk)
+        Ok((disk, transaction_log))
+    }
+
+    pub fn get_wip_root(&self) -> PathBuf {
+        self.path.join("wip")
     }
 
     pub fn get_wip_path(&self, txnid: TxnId) -> PathBuf {
-        self.path.join("wip").join(txnid.to_string())
+        self.get_wip_root().join(txnid.to_string())
     }
 
-    pub fn get_backup_path(&self, txnid: TxnId) -> PathBuf {
-        self.path.join("backup").join(txnid.to_string())
+    pub fn get_object_root(&self) -> PathBuf {
+        self.path.join("objects")
     }
 
     pub fn get_object_path(&self, key: &Utf8Path) -> PathBuf {
-        self.path.join("objects").join(key)
+        self.get_object_root().join(key)
     }
 
-    pub fn list_wip_txns(&self) -> anyhow::Result<Vec<TxnId>> {
-        let mut txns: Vec<TxnId> = Vec::new();
-        for entry in fs::read_dir(self.path.join("wip"))? {
+    pub fn choose_highest_txn(
+        &self,
+        key: &Utf8Path,
+        predicate: impl Fn(TxnId) -> bool,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        let _versions: Vec<TxnId> = Vec::new();
+        let mut choice = None;
+
+        let prefix_path = self.get_object_path(key);
+
+        for entry in fs::read_dir(prefix_path)? {
             let entry = entry?;
             let filename = entry.file_name();
-            let uuid = u64::from_str(filename.to_str().ok_or_else(|| {
+
+            let txnid = match u64::from_str(filename.to_str().ok_or_else(|| {
                 anyhow!(format!("Invalid UTF-8 in transaction ID: {:?}", filename))
-            })?)
-            .with_context(|| format!("Invalid transaction ID: {:?}", filename))?;
-            txns.push(uuid);
+            })?) {
+                Ok(txnid) => txnid,
+                Err(_) => continue,
+            };
+
+            if !predicate(txnid) {
+                continue;
+            }
+
+            match choice {
+                None => choice = Some((txnid, entry.path())),
+                Some((old_txnid, _)) => {
+                    if txnid > old_txnid {
+                        choice = Some((txnid, entry.path()))
+                    }
+                }
+            }
         }
 
-        Ok(txns)
+        Ok(choice.map(|(_, path)| path))
     }
 }
 
 pub struct StorageEngine {
     disks: Vec<Disk>,
+    wals: RwLock<Vec<TransactionLog>>,
+    txn_alloc_mutex: Mutex<()>,
     txn_counter: AtomicU64,
-    uncommitted: dashmap::DashMap<Utf8PathBuf, HashSet<TxnId>>,
-    commit_locks: LockPool,
+    uncommitted: dashmap::DashSet<TxnId>,
 }
 
 impl StorageEngine {
@@ -158,25 +180,30 @@ impl StorageEngine {
             .map(|_| uuid::Uuid::new_v4())
             .collect();
         uuids.sort();
+        let mut wals = Vec::with_capacity(disk_paths.len());
         for (path, uuid) in disk_paths.iter().zip(&uuids) {
-            let disk = Disk::create(path.to_owned(), *uuid, uuids.to_owned())
+            let (disk, wal) = Disk::create(path.to_owned(), *uuid, uuids.to_owned())
                 .with_context(|| format!("{:?}", path))?;
             disks.push(disk);
+            wals.push(wal);
         }
 
         Ok(Self {
             disks,
+            wals: RwLock::new(wals),
+            txn_alloc_mutex: Mutex::new(()),
             txn_counter: AtomicU64::new(0),
-            uncommitted: dashmap::DashMap::new(),
-            commit_locks: LockPool::new(),
+            uncommitted: dashmap::DashSet::new(),
         })
     }
 
     pub fn load(disk_paths: &[PathBuf]) -> anyhow::Result<Self> {
-        let disks = disk_paths
+        let (disks, wals): (Vec<Disk>, Vec<TransactionLog>) = disk_paths
             .iter()
             .map(|path| Disk::load(path.clone()))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .unzip();
 
         // Ensure all disks know they're all in the same pack
         let mut pack_uuids: Vec<uuid::Uuid> = disks.iter().map(|d| d.uuid).collect();
@@ -189,134 +216,273 @@ impl StorageEngine {
 
         let engine = StorageEngine {
             disks,
+            wals: RwLock::new(wals),
+            txn_alloc_mutex: Mutex::new(()),
             txn_counter: AtomicU64::new(0),
-            uncommitted: dashmap::DashMap::new(),
-            commit_locks: LockPool::new(),
+            uncommitted: dashmap::DashSet::new(),
         };
         engine.cleanup_incomplete()?;
         Ok(engine)
     }
 
     fn cleanup_incomplete(&self) -> anyhow::Result<()> {
+        struct TransactionRecord {
+            key: Utf8PathBuf,
+            committed_set: std::collections::HashSet<uuid::Uuid>,
+        }
+
+        let mut txns: std::collections::HashMap<TxnId, TransactionRecord> =
+            std::collections::HashMap::new();
+        // Reconcile WALs
+        {
+            let mut wals = self.wals.write();
+            for (disk, wal) in self.disks.iter().zip(wals.iter_mut()) {
+                for record in wal.iterate()? {
+                    let record = record?;
+                    let txn_entry = txns.entry(record.txid).or_insert(TransactionRecord {
+                        key: Utf8PathBuf::from(&record.key),
+                        committed_set: std::collections::HashSet::new(),
+                    });
+                    assert_eq!(
+                        txn_entry.key,
+                        Utf8Path::new(&record.key),
+                        "txnid {} has inconsistent keys across disks: expected {}, got {}",
+                        record.txid,
+                        txn_entry.key,
+                        record.key
+                    );
+
+                    match record.state {
+                        transaction_log::WalState::Prepared => {}
+                        transaction_log::WalState::Committed => {
+                            txn_entry.committed_set.insert(disk.uuid);
+                        }
+                        transaction_log::WalState::Aborted => {}
+                    }
+                }
+            }
+        }
+
+        // Clean up transactions we've now established are incomplete
+        let disk_uuids: std::collections::HashSet<uuid::Uuid> =
+            self.disks.iter().map(|disk| disk.uuid).collect();
+        for (txnid, txn) in txns.iter() {
+            if txn.committed_set != disk_uuids {
+                // Remove all artifacts associated with the aborted txnid
+                if let Err(cleanup_err) = self.cleanup(&txn.key, *txnid) {
+                    panic!(
+                        "Failed to cleanup transaction at startup {}: {}",
+                        txnid, cleanup_err
+                    );
+                }
+            }
+        }
+
+        // Choose a next transaction ID
+        // Really we don't have to lock this mutex since this must only be called at startup,
+        // but it's good hygiene
+        let _guard = self.txn_alloc_mutex.lock();
+        self.txn_counter.store(
+            txns.keys().max().map(|txnid| txnid + 1).unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         Ok(())
     }
 
-    pub fn get(&self, key: &Utf8Path, sink: &mut impl Write) -> anyhow::Result<()> {
-        let txns = self.uncommitted.get(key);
-        if self.uncommitted.contains_key(key) {
-            return Err(anyhow!("Key is currently being written"));
-        }
+    pub fn get(&self, key: &Utf8Path, sink: &mut impl Write) -> anyhow::Result<Option<()>> {
+        let key = clean_key(key);
 
-        let obj_path = self.disks[0].get_object_path(key);
+        let max_txnid = self.txn_counter.load(std::sync::atomic::Ordering::Acquire);
+        let obj_path = match self.disks[0].choose_highest_txn(&key, |txnid| {
+            txnid < max_txnid && !self.uncommitted.contains(&txnid)
+        })? {
+            Some(path) => path,
+            None => return Ok(None),
+        };
+
         let mut obj_file = OpenOptions::new().read(true).open(obj_path)?;
         std::io::copy(&mut obj_file, sink)?;
         sink.flush()?;
+
+        Ok(Some(()))
+    }
+
+    pub fn list(&self, prefix: &Utf8Path) -> anyhow::Result<Vec<Utf8PathBuf>> {
+        let prefix = clean_key(prefix);
+
+        let uncommitted_txnids_snapshot = self.uncommitted.clone();
+        let max_txnid = self.txn_counter.load(std::sync::atomic::Ordering::Acquire);
+        let disk = &self.disks[0];
+
+        let mut result: Vec<Utf8PathBuf> = Vec::new();
+
+        for entry in walkdir::WalkDir::new(disk.get_object_path(&prefix)).sort_by_file_name() {
+            let entry = entry?;
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            if path.file_name() != Some(std::ffi::OsStr::new(MARKER_FILENAME)) {
+                continue;
+            }
+
+            let key = Utf8Path::from_path(path.parent().unwrap())
+                .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path: {}", path.display()))?;
+
+            let relative_key = key
+                .strip_prefix(disk.get_object_root())
+                .context("Failed to strip object root prefix")?;
+
+            if let Some(_) = disk.choose_highest_txn(relative_key, |txnid| {
+                txnid < max_txnid && !uncommitted_txnids_snapshot.contains(&txnid)
+            })? {
+                result.push(unclean_key(relative_key).with_context(|| {
+                    format!(
+                        "Invalid non-UTF8 path in escape characters: {}",
+                        relative_key.as_str()
+                    )
+                })?);
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn _put(&self, key: &Utf8Path, reader: &mut impl Read, txnid: TxnId) -> anyhow::Result<()> {
+        self.uncommitted.insert(txnid);
+
+        // Write our prepare message to WALs
+        let mut wals = self.wals.write();
+        for (_disk, wal) in self.disks.iter().zip(wals.iter_mut()) {
+            wal.append(
+                transaction_log::WalType::Write,
+                txnid,
+                key.as_str(),
+                transaction_log::WalState::Prepared,
+            )?;
+        }
+        drop(wals);
+        for wal in self.wals.read().iter() {
+            wal.fsync()?;
+        }
+
+        // Create WIP files
+        let wip_paths: Vec<_> = self
+            .disks
+            .iter()
+            .map(|disk| disk.get_wip_path(txnid))
+            .collect();
+        let mut wip_files: Vec<_> = wip_paths
+            .iter()
+            .map(|path| {
+                std::fs::File::create(path)
+                    .with_context(|| format!("Failed to create file at {}", path.display()))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        let mut multi_writer = fsutil::MultiWriter::new(wip_files.iter_mut().collect());
+        std::io::copy(reader, &mut multi_writer)?;
+        for wip_file in wip_files.iter() {
+            wip_file.sync_data()?;
+        }
+        fsutil::sync_paths(self.disks.iter().map(|disk| disk.get_wip_root()))?;
+
+        // Rename WIP to final locations
+        let object_paths: Vec<_> = self
+            .disks
+            .iter()
+            .map(|disk| disk.get_object_path(key))
+            .collect();
+        for object_path in &object_paths {
+            std::fs::create_dir_all(object_path)?;
+        }
+        for object_path in &object_paths {
+            std::fs::File::create(object_path.join(MARKER_FILENAME))?;
+        }
+        let final_paths: Vec<_> = object_paths
+            .iter()
+            .map(|path| path.join(txnid.to_string()))
+            .collect();
+        for (wip_path, final_path) in wip_paths.iter().zip(final_paths.iter()) {
+            std::fs::rename(wip_path, final_path)?;
+        }
+        fsutil::sync_paths(&object_paths)?;
+
+        // Write committed to the WAL
+        let mut wals = self.wals.write();
+        for wal in wals.iter_mut() {
+            wal.append(
+                transaction_log::WalType::Write,
+                txnid,
+                key.as_str(),
+                transaction_log::WalState::Committed,
+            )?;
+        }
+        drop(wals);
+        for wal in self.wals.read().iter() {
+            wal.fsync()?;
+        }
 
         Ok(())
     }
 
     pub fn put(&self, key: &Utf8Path, reader: &mut impl Read) -> anyhow::Result<()> {
-        let txnid = self
-            .txn_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let key = clean_key(key);
 
-        let key_str = key.as_str();
-        for disk in &self.disks {
-            disk.transaction_log.append(
-                transaction_log::WalType::Write,
-                txnid,
-                key_str,
-                transaction_log::WalState::Prepared,
-            )?;
-        }
+        let txnid = {
+            let _guard = self.txn_alloc_mutex.lock();
+            let txnid = self
+                .txn_counter
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.uncommitted.insert(txnid);
+            txnid
+        };
 
-        self.uncommitted
-            .entry(key.to_owned())
-            .or_default()
-            .insert(txnid);
-
-        // Write to each WIP directory
-        let mut filenames: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(self.disks.len());
+        let result = self._put(&key, reader, txnid);
+        if result.is_err()
+            && let Err(cleanup_error) = self.cleanup(&key, txnid)
         {
-            let mut buf = vec![0u8; CHUNK_SIZE];
-            let mut disk_files = Vec::with_capacity(self.disks.len());
-            for disk in &self.disks {
-                let wip_path = disk.get_wip_path(txnid);
-                filenames.push((wip_path.clone(), disk.get_object_path(key)));
-                let wip_file = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(wip_path)?;
-                disk_files.push(wip_file);
-            }
+            panic!("Failed to cleanup transaction {}: {}", txnid, cleanup_error);
+        }
+        self.uncommitted.remove(&txnid);
+        result
+    }
 
-            loop {
-                let filled = fsutil::read_retry_on_intr(reader, &mut buf)?;
-                if filled.is_empty() {
-                    break;
-                }
+    fn cleanup(&self, key: &Utf8Path, txnid: u64) -> anyhow::Result<()> {
+        let object_paths: Vec<_> = self
+            .disks
+            .iter()
+            .map(|disk| disk.get_object_path(key))
+            .collect();
 
-                for wip_file in &mut disk_files {
-                    wip_file.write_all(filled)?;
-                }
-            }
-
-            for wip_file in &disk_files {
-                wip_file.sync_data()?;
-            }
+        for path in object_paths.iter().map(|disk| disk.join(txnid.to_string())) {
+            fsutil::ignore_errorkind(std::fs::remove_file(path), std::io::ErrorKind::NotFound)?;
         }
 
-        // Start the commit
-        let commit_lock = self.commit_locks.get_lock(&key).lock().unwrap();
-
-        // Create parent dirs
-        for (_, final_path) in &filenames {
-            fs::create_dir_all(final_path.parent().unwrap())?;
+        for wip_path in self.disks.iter().map(|disk| disk.get_wip_path(txnid)) {
+            fsutil::ignore_errorkind(std::fs::remove_file(wip_path), std::io::ErrorKind::NotFound)?;
         }
+        fsutil::ignore_errorkind(
+            fsutil::sync_paths(&object_paths),
+            std::io::ErrorKind::NotFound,
+        )?;
+        fsutil::sync_paths(self.disks.iter().map(|disk| disk.get_wip_root()))?;
 
-        for disk in &self.disks {
-            let obj_path = disk.get_object_path(key);
-            let backup_path = disk.get_backup_path(txnid);
-
-            // Move old version to backup (if exists)
-            if obj_path.exists() {
-                match fs::rename(&obj_path, &backup_path) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == ErrorKind::NotFound => {}
-                    Err(e) => return Err(e).with_context(|| "Error creating commit backup links"),
-                }
-            }
-
-            // Rename wip to objects
-            fs::create_dir_all(obj_path.parent().unwrap())?;
-        }
-
-        // Move each to its final location
-        for (wip_path, final_path) in &filenames {
-            std::fs::rename(wip_path, final_path)?;
-        }
-
-        // Mark transaction complete
-        for disk in &self.disks {
-            disk.transaction_log.append(
+        // Write aborted to the WAL
+        let mut wals = self.wals.write();
+        for wal in wals.iter_mut() {
+            wal.append(
                 transaction_log::WalType::Write,
                 txnid,
-                key_str,
-                transaction_log::WalState::Committed,
+                key.as_str(),
+                transaction_log::WalState::Aborted,
             )?;
         }
-
-        self.uncommitted.remove_if_mut(key, |_k, set| {
-            set.remove(&txnid);
-            set.is_empty()
-        });
-
-        drop(commit_lock);
-
-        // Remove backup files
-        for disk in &self.disks {
-            std::fs::remove_file(disk.get_backup_path(txnid))?;
+        drop(wals);
+        for wal in self.wals.read().iter() {
+            wal.fsync()?;
         }
 
         Ok(())
