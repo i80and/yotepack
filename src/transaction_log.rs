@@ -9,7 +9,6 @@ use crate::fsutil;
 use crate::txnlog_capnp;
 
 pub use txnlog_capnp::State as WalState;
-pub use txnlog_capnp::Type as WalType;
 
 fn read_exact_or_eof<R: Read, const N: usize>(reader: &mut R) -> anyhow::Result<Option<[u8; N]>> {
     let mut buf = [0u8; N];
@@ -86,7 +85,6 @@ where
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub entry_type: WalType,
     pub txid: u64,
     pub key: String,
     pub state: WalState,
@@ -119,7 +117,6 @@ impl<'a, R: Read> Iterator for TransactionLogIterator<'a, R> {
             let entry = message_reader.get_root::<txnlog_capnp::transaction_log_entry::Reader>()?;
 
             Ok(Some(LogEntry {
-                entry_type: entry.get_type()?,
                 txid: entry.get_txid(),
                 key: entry.get_key()?.to_string()?,
                 state: entry.get_state()?,
@@ -153,17 +150,10 @@ impl TransactionLog {
         Ok(Self { path, file })
     }
 
-    pub fn append(
-        &mut self,
-        ty: WalType,
-        txid: u64,
-        key: &str,
-        state: WalState,
-    ) -> anyhow::Result<()> {
+    pub fn append(&mut self, txid: u64, key: &str, state: WalState) -> anyhow::Result<()> {
         let mut message = ::capnp::message::Builder::new_default();
 
         let mut log_entry = message.init_root::<txnlog_capnp::transaction_log_entry::Builder>();
-        log_entry.set_type(ty);
         log_entry.set_txid(txid);
         log_entry.set_state(state);
         log_entry.set_key(key);
@@ -250,19 +240,18 @@ mod tests {
         let mut log = TransactionLog::new(log_path).unwrap();
 
         let entries = vec![
-            (WalType::Write, "key1", WalState::Prepared),
-            (WalType::Write, "key2", WalState::Committed),
-            (WalType::Delete, "key3", WalState::Aborted),
+            ("key1", WalState::Prepared),
+            ("key2", WalState::Committed),
+            ("key3", WalState::Aborted),
         ];
 
-        for (ty, key, state) in &entries {
-            log.append(*ty, 0, key, *state).unwrap();
+        for (key, state) in &entries {
+            log.append(0, key, *state).unwrap();
         }
 
         let mut iter = log.iterate().unwrap();
-        for (expected_ty, expected_key, expected_state) in entries {
+        for (expected_key, expected_state) in entries {
             let entry = iter.next().unwrap().unwrap();
-            assert_eq!(entry.entry_type, expected_ty);
             assert_eq!(entry.key, expected_key);
             assert_eq!(entry.state, expected_state);
         }
@@ -288,11 +277,8 @@ mod tests {
         let log_path = dir.path().join("test.log");
         let mut log = TransactionLog::new(log_path.clone()).unwrap();
 
-        log.append(WalType::Write, 0, "key1", WalState::Prepared)
-            .unwrap();
-
-        log.append(WalType::Write, 1, "key2", WalState::Committed)
-            .unwrap();
+        log.append(0, "key1", WalState::Prepared).unwrap();
+        log.append(1, "key2", WalState::Committed).unwrap();
 
         log.clear().unwrap();
 
@@ -310,13 +296,11 @@ mod tests {
         let log_path = dir.path().join("test.log");
         let mut log = TransactionLog::new(log_path.clone()).unwrap();
 
-        log.append(WalType::Write, 0, "old_key", WalState::Prepared)
-            .unwrap();
+        log.append(0, "old_key", WalState::Prepared).unwrap();
 
         log.clear().unwrap();
 
-        log.append(WalType::Write, 1, "new_key", WalState::Committed)
-            .unwrap();
+        log.append(1, "new_key", WalState::Committed).unwrap();
 
         let iter = log.iterate().unwrap();
         let entries: Vec<String> = iter.map(|e| e.unwrap().key).collect();
@@ -338,8 +322,7 @@ mod tests {
         ];
 
         for key in &special_keys {
-            log.append(WalType::Write, 0, key, WalState::Prepared)
-                .unwrap();
+            log.append(0, key, WalState::Prepared).unwrap();
         }
 
         let mut iter = log.iterate().unwrap();
@@ -358,8 +341,7 @@ mod tests {
         let keys = vec!["key 1", "key 2", "key 3"];
 
         for key in &keys {
-            log.append(WalType::Write, 0, key, WalState::Prepared)
-                .unwrap();
+            log.append(0, key, WalState::Prepared).unwrap();
         }
 
         // Now let's corrupt the file ehehe

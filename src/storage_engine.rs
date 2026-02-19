@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 const MIN_DISKS: usize = 3;
 const MARKER_FILENAME: &str = "yote.marker";
+const DELETE_SUFFIX: &str = ".deleted";
 
 const PERCENT_ENCODE_SET: percent_encoding::AsciiSet = percent_encoding::AsciiSet::EMPTY.add(b'.');
 
@@ -135,7 +136,7 @@ impl Disk {
                 ))
             })?;
 
-            let stripped_tombstone = filename.trim_end_matches(".deleted");
+            let stripped_tombstone = filename.trim_end_matches(DELETE_SUFFIX);
 
             let (txnid, is_tombstone): (&str, bool) = if filename.len() > stripped_tombstone.len() {
                 (stripped_tombstone, true)
@@ -387,12 +388,7 @@ impl StorageEngine {
         // Write our prepare message to WALs
         let mut wals = self.wals.write();
         for (_disk, wal) in self.disks.iter().zip(wals.iter_mut()) {
-            wal.append(
-                transaction_log::WalType::Write,
-                txnid,
-                key.as_str(),
-                transaction_log::WalState::Prepared,
-            )?;
+            wal.append(txnid, key.as_str(), transaction_log::WalState::Prepared)?;
         }
         drop(wals);
         for wal in self.wals.read().iter() {
@@ -436,7 +432,7 @@ impl StorageEngine {
         let filename = if reader.is_some() {
             txnid.to_string()
         } else {
-            format!("{}.deleted", txnid)
+            format!("{}{}", txnid, DELETE_SUFFIX)
         };
         let final_paths: Vec<_> = object_paths
             .iter()
@@ -450,12 +446,7 @@ impl StorageEngine {
         // Write committed to the WAL
         let mut wals = self.wals.write();
         for wal in wals.iter_mut() {
-            wal.append(
-                transaction_log::WalType::Write,
-                txnid,
-                key.as_str(),
-                transaction_log::WalState::Committed,
-            )?;
+            wal.append(txnid, key.as_str(), transaction_log::WalState::Committed)?;
         }
         drop(wals);
         for wal in self.wals.read().iter() {
@@ -510,12 +501,7 @@ impl StorageEngine {
         // Write aborted to the WAL
         let mut wals = self.wals.write();
         for wal in wals.iter_mut() {
-            wal.append(
-                transaction_log::WalType::Write,
-                txnid,
-                key.as_str(),
-                transaction_log::WalState::Aborted,
-            )?;
+            wal.append(txnid, key.as_str(), transaction_log::WalState::Aborted)?;
         }
         drop(wals);
         for wal in self.wals.read().iter() {
