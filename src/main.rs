@@ -54,12 +54,16 @@ fn main() -> anyhow::Result<()> {
             println!("Serving with disks: {:?}", disks);
             let engine = storage_engine::StorageEngine::load(disks.as_slice())?;
             let key = Utf8Path::new("foobar");
-            engine.put(key, Some(&mut std::io::Cursor::new(b"hello world")))?;
+            engine.put(
+                key,
+                Some(&mut std::io::Cursor::new(b"hello world")),
+                &[("waow", "yes")],
+            )?;
             let mut out_buf = vec![];
             assert_eq!(engine.get(key, &mut out_buf)?, Some(()));
             assert_eq!(out_buf, b"hello world");
             assert_eq!(engine.list(key)?, vec![key]);
-            engine.put(key, None)?;
+            engine.put(key, None, &[])?;
             assert_eq!(engine.get(key, &mut out_buf)?, None);
             assert_eq!(engine.list(key)?, Vec::<Utf8PathBuf>::new());
         }

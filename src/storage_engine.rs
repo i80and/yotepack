@@ -11,6 +11,7 @@ use crate::transaction_log::{self, TransactionLog};
 use anyhow::{Context, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
+use xattr::FileExt;
 
 const MIN_DISKS: usize = 3;
 const MARKER_FILENAME: &str = "yote.marker";
@@ -382,6 +383,7 @@ impl StorageEngine {
         key: &Utf8Path,
         mut reader: Option<&mut dyn Read>,
         txnid: TxnId,
+        metadata: &[(&str, &str)],
     ) -> anyhow::Result<()> {
         self.uncommitted.insert(txnid);
 
@@ -408,6 +410,11 @@ impl StorageEngine {
                     .with_context(|| format!("Failed to create file at {}", path.display()))
             })
             .collect::<anyhow::Result<_>>()?;
+        for wip_file in wip_files.iter_mut() {
+            for (key, value) in metadata {
+                wip_file.set_xattr(format!("user.{}", key), value.as_bytes())?;
+            }
+        }
         if let Some(reader) = &mut reader {
             let mut multi_writer = fsutil::MultiWriter::new(wip_files.iter_mut().collect());
             std::io::copy(reader, &mut multi_writer)?;
@@ -456,7 +463,12 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub fn put(&self, key: &Utf8Path, reader: Option<&mut dyn Read>) -> anyhow::Result<()> {
+    pub fn put(
+        &self,
+        key: &Utf8Path,
+        reader: Option<&mut dyn Read>,
+        metadata: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
         let key = clean_key(key);
 
         let txnid = {
@@ -468,7 +480,7 @@ impl StorageEngine {
             txnid
         };
 
-        let result = self._put(&key, reader, txnid);
+        let result = self._put(&key, reader, txnid, metadata);
         if result.is_err()
             && let Err(cleanup_error) = self.cleanup(&key, txnid)
         {
