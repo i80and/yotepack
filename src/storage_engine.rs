@@ -37,6 +37,11 @@ fn unclean_key(key: &Utf8Path) -> anyhow::Result<Utf8PathBuf> {
     Ok(out)
 }
 
+enum KeyMatch {
+    Object(PathBuf),
+    Deleted,
+}
+
 #[derive(Deserialize, Serialize)]
 struct DiskConfig {
     uuid: uuid::Uuid,
@@ -114,7 +119,7 @@ impl Disk {
         &self,
         key: &Utf8Path,
         predicate: impl Fn(TxnId) -> bool,
-    ) -> anyhow::Result<Option<PathBuf>> {
+    ) -> anyhow::Result<Option<KeyMatch>> {
         let _versions: Vec<TxnId> = Vec::new();
         let mut choice = None;
 
@@ -122,11 +127,23 @@ impl Disk {
 
         for entry in fs::read_dir(prefix_path)? {
             let entry = entry?;
-            let filename = entry.file_name();
+            let raw_filename = entry.file_name();
+            let filename = raw_filename.to_str().ok_or_else(|| {
+                anyhow!(format!(
+                    "Invalid UTF-8 in transaction ID: {:?}",
+                    entry.file_name()
+                ))
+            })?;
 
-            let txnid = match u64::from_str(filename.to_str().ok_or_else(|| {
-                anyhow!(format!("Invalid UTF-8 in transaction ID: {:?}", filename))
-            })?) {
+            let stripped_tombstone = filename.trim_end_matches(".deleted");
+
+            let (txnid, is_tombstone): (&str, bool) = if filename.len() > stripped_tombstone.len() {
+                (stripped_tombstone, true)
+            } else {
+                (filename, false)
+            };
+
+            let txnid = match u64::from_str(txnid) {
                 Ok(txnid) => txnid,
                 Err(_) => continue,
             };
@@ -135,11 +152,19 @@ impl Disk {
                 continue;
             }
 
+            let get_keymatch = || {
+                if is_tombstone {
+                    KeyMatch::Deleted
+                } else {
+                    KeyMatch::Object(entry.path().to_owned())
+                }
+            };
+
             match choice {
-                None => choice = Some((txnid, entry.path())),
+                None => choice = Some((txnid, get_keymatch())),
                 Some((old_txnid, _)) => {
                     if txnid > old_txnid {
-                        choice = Some((txnid, entry.path()))
+                        choice = Some((txnid, get_keymatch()))
                     }
                 }
             }
@@ -297,8 +322,8 @@ impl StorageEngine {
         let obj_path = match self.disks[0].choose_highest_txn(&key, |txnid| {
             txnid < max_txnid && !self.uncommitted.contains(&txnid)
         })? {
-            Some(path) => path,
-            None => return Ok(None),
+            Some(KeyMatch::Object(path)) => path,
+            _ => return Ok(None),
         };
 
         let mut obj_file = OpenOptions::new().read(true).open(obj_path)?;
@@ -336,7 +361,7 @@ impl StorageEngine {
                 .strip_prefix(disk.get_object_root())
                 .context("Failed to strip object root prefix")?;
 
-            if let Some(_) = disk.choose_highest_txn(relative_key, |txnid| {
+            if let Some(KeyMatch::Object(_)) = disk.choose_highest_txn(relative_key, |txnid| {
                 txnid < max_txnid && !uncommitted_txnids_snapshot.contains(&txnid)
             })? {
                 result.push(unclean_key(relative_key).with_context(|| {
@@ -351,7 +376,12 @@ impl StorageEngine {
         Ok(result)
     }
 
-    fn _put(&self, key: &Utf8Path, reader: &mut impl Read, txnid: TxnId) -> anyhow::Result<()> {
+    fn _put(
+        &self,
+        key: &Utf8Path,
+        mut reader: Option<&mut dyn Read>,
+        txnid: TxnId,
+    ) -> anyhow::Result<()> {
         self.uncommitted.insert(txnid);
 
         // Write our prepare message to WALs
@@ -382,10 +412,12 @@ impl StorageEngine {
                     .with_context(|| format!("Failed to create file at {}", path.display()))
             })
             .collect::<anyhow::Result<_>>()?;
-        let mut multi_writer = fsutil::MultiWriter::new(wip_files.iter_mut().collect());
-        std::io::copy(reader, &mut multi_writer)?;
-        for wip_file in wip_files.iter() {
-            wip_file.sync_data()?;
+        if let Some(reader) = &mut reader {
+            let mut multi_writer = fsutil::MultiWriter::new(wip_files.iter_mut().collect());
+            std::io::copy(reader, &mut multi_writer)?;
+            for wip_file in wip_files.iter() {
+                wip_file.sync_data()?;
+            }
         }
         fsutil::sync_paths(self.disks.iter().map(|disk| disk.get_wip_root()))?;
 
@@ -401,9 +433,14 @@ impl StorageEngine {
         for object_path in &object_paths {
             std::fs::File::create(object_path.join(MARKER_FILENAME))?;
         }
+        let filename = if reader.is_some() {
+            txnid.to_string()
+        } else {
+            format!("{}.deleted", txnid)
+        };
         let final_paths: Vec<_> = object_paths
             .iter()
-            .map(|path| path.join(txnid.to_string()))
+            .map(|path| path.join(&filename))
             .collect();
         for (wip_path, final_path) in wip_paths.iter().zip(final_paths.iter()) {
             std::fs::rename(wip_path, final_path)?;
@@ -428,7 +465,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub fn put(&self, key: &Utf8Path, reader: &mut impl Read) -> anyhow::Result<()> {
+    pub fn put(&self, key: &Utf8Path, reader: Option<&mut dyn Read>) -> anyhow::Result<()> {
         let key = clean_key(key);
 
         let txnid = {

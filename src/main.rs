@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand};
 
 pub mod block_capnp {
@@ -53,17 +53,15 @@ fn main() -> anyhow::Result<()> {
         Commands::Serve { disks } => {
             println!("Serving with disks: {:?}", disks);
             let engine = storage_engine::StorageEngine::load(disks.as_slice())?;
-            engine.put(
-                Utf8Path::new("foobar"),
-                &mut std::io::Cursor::new(b"hello world"),
-            )?;
+            let key = Utf8Path::new("foobar");
+            engine.put(key, Some(&mut std::io::Cursor::new(b"hello world")))?;
             let mut out_buf = vec![];
-            engine.get(Utf8Path::new("foobar"), &mut out_buf)?;
+            assert_eq!(engine.get(key, &mut out_buf)?, Some(()));
             assert_eq!(out_buf, b"hello world");
-            assert_eq!(
-                engine.list(Utf8Path::new("foobar"))?,
-                vec![Utf8Path::new("foobar")]
-            );
+            assert_eq!(engine.list(key)?, vec![key]);
+            engine.put(key, None)?;
+            assert_eq!(engine.get(key, &mut out_buf)?, None);
+            assert_eq!(engine.list(key)?, Vec::<Utf8PathBuf>::new());
         }
         Commands::Resize { disks } => {
             println!("Resizing with disks: {:?}", disks);
