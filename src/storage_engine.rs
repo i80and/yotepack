@@ -16,6 +16,8 @@ use xattr::FileExt;
 const MIN_DISKS: usize = 3;
 const MARKER_FILENAME: &str = "yote.marker";
 const DELETE_SUFFIX: &str = ".deleted";
+const WAL_FILENAME: &str = "wal";
+const CONFIG_FILENAME: &str = "config.toml";
 
 const PERCENT_ENCODE_SET: percent_encoding::AsciiSet = percent_encoding::AsciiSet::EMPTY.add(b'.');
 
@@ -78,19 +80,19 @@ impl Disk {
         OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(path.join("config.toml"))
+            .open(path.join(CONFIG_FILENAME))
             .and_then(|mut file| file.write_all(config_text.as_bytes()))
             .with_context(|| "")?;
 
-        let transaction_log = transaction_log::TransactionLog::new(path.join("wal"))?;
+        let transaction_log = transaction_log::TransactionLog::new(path.join(WAL_FILENAME))?;
 
         Ok((Disk { path, uuid, pack }, transaction_log))
     }
 
     pub fn load(path: PathBuf) -> anyhow::Result<(Self, TransactionLog)> {
-        let config_text = std::fs::read_to_string(path.join("config.toml"))?;
+        let config_text = std::fs::read_to_string(path.join(CONFIG_FILENAME))?;
         let config: DiskConfig = toml::from_str(&config_text)?;
-        let transaction_log = transaction_log::TransactionLog::new(path.join("wal"))?;
+        let transaction_log = transaction_log::TransactionLog::new(path.join(WAL_FILENAME))?;
 
         let disk = Disk {
             path,
