@@ -1,0 +1,296 @@
+# DESIGN: Erasure-Coded Object Storage
+
+## 1. OVERVIEW
+
+Single-node object storage with:
+
+- **Unlimited object sizes** — objects split into fixed-size chunks
+- **Erasure-coded data** — Reed-Solomon tolerating up to M disk failures
+- **Replicated metadata** — one Fjall KV per disk, full redundancy
+- **MVCC versioning** — pending → committed lifecycle with read-your-writes
+- **Bitrot detection** — per-shard checksums, automatic correction on read
+
+## 2. ARCHITECTURE
+
+```
+┌──────────────────────────────────────────────────────┐
+│                  ObjectStorage                       │
+│                                                      │
+│  ┌─────────────────────┐  ┌──────────────────────┐  │
+│  │ ReplicatedMetaStore │  │  ChunkStore          │  │
+│  │                     │  │                      │  │
+│  │  Disk 0: meta_db    │  │  Disk 0: data +      │  │
+│  │  Disk 1: meta_db    │  │    erasure shard     │  │
+│  │  ...                │  │  ...                 │  │
+│  │  Disk N: meta_db    │  │  Disk N: data +      │  │
+│  │                     │  │    erasure shard     │  │
+│  └─────────────────────┘  └──────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+```
+
+### Two Layers
+
+**Metadata layer** — object version maps, chunk lists, counters.
+Each disk holds a complete copy (one Fjall DB). Writes target all healthy
+disks in parallel; failed disks are repaired lazily.
+
+**Data layer** — erasure-coded chunk shards. Each chunk is split into K data
+shards + C parity shards, one per disk. Surviving shards can reconstruct
+any missing shard via Reed-Solomon.
+
+## 3. DATA LAYER
+
+### 3.1 Erasure Coding Parameters
+
+```
+K = M + 1          — data shards
+C = M              — parity shards
+N = 2M + 1         — total shards (one per disk)
+```
+
+Space overhead = (2M+1)/(M+1):  M=1 → 2.0x, M=2 → 1.67x, M=10 → 1.18x
+
+### 3.2 Chunk Storage
+
+A chunk of up to ~64 MB is split into K sub-shards, encoded into N shards,
+and one shard is written to each disk. Each shard file stores data followed
+by a 128-bit checksum.
+
+```
+chunk_id → K sub-shards → N erasure shards → one per disk
+```
+
+### 3.3 Read and Recovery
+
+**Read**: all N shards are read in parallel. The K data shards are
+reassembled into chunk data. Per-shard checksums detect bitrot.
+
+**Recovery**: if up to M shards are missing or corrupted, Reed-Solomon
+reconstructs them from surviving shards. Corrected shards are written back.
+
+### 3.4 Fault Tolerance
+
+| Scenario | Outcome |
+|---|---|
+| 0 failures | Normal read/write |
+| ≤M disk failures | Erasure coding recovers missing shards |
+| M+1 disk failures | Chunk unrecoverable — `TooManyFailures` |
+| Bitrot on shard | Detected by checksum, corrected via re-encode |
+
+## 4. METADATA LAYER
+
+### 4.1 Replicated Storage
+
+One Fjall database per disk, each containing the full keyspace.
+Keys use logical prefixes to separate data:
+
+| Prefix | Purpose |
+|---|---|
+| `ver:<key>:<n>` | Version metadata (status, checksum, chunk list) |
+| `ver:<key>:<n>:chunks` | Chunk ID list for version n |
+| `obj:meta:<key>` | Latest version counter |
+| `chk:<chunk_id>` | Chunk-level 128-bit checksum |
+
+### 4.2 Write Path
+
+Write a batch (multiple keys) to all healthy disks in parallel.
+Any disk that fails is marked and repaired on the next access.
+
+```
+PUT → write_batch → [disk0 ✓, disk1 ✓, disk2 ✗]
+                          ↓ repair
+                      disk2 repair attempt (best-effort)
+```
+
+### 4.3 Read Path
+
+Read from the first healthy disk containing the key. Then repair any
+stale failed disks with the returned value (repair-on-read).
+
+```
+GET "foo" → read from disk0 → return value → repair disks 1,2
+```
+
+### 4.4 Disk Lifecycle
+
+```
+Healthy ──IO error──> Failed ──IO recovers──> Repairing ──sync done──> Healthy
+```
+
+- **Failed**: disk removed from healthy pool after an IO error.
+- **Repairing**: admin calls `recover_disk()` to sync the full keyspace
+  from a healthy disk. Disk is then returned to Healthy state.
+
+### 4.5 Fault Tolerance
+
+| Healthy disks | Metadata layer status |
+|---|---|
+| N | Full redundancy |
+| N-1 | Single failure tolerated |
+| 1 | Critical — one more failure is total loss |
+| 0 | Dead — metadata unrecoverable |
+
+With N disks and full replication, metadata tolerates N-1 disk failures.
+Combined with data-layer tolerance of M failures, the system can survive
+up to N-1 metadata failures and M data failures independently.
+
+## 5. VERSIONING
+
+### 5.1 Version States
+
+```
+VersionStatus: Committed (0x00) | Pending (0x01) | Deleted (0x02)
+```
+
+A version flows through: **Pending → Committed** (on successful write)
+or **Pending → Deleted** (on abort/cleanup).
+
+### 5.2 Write Lifecycle (PUT)
+
+```
+1. Determine next version number (increment counter)
+2. Set pending: write version metadata, chunk list, and counter
+3. Write all chunk shards to data disks (erasure-coded)
+4. Promote to committed: atomically flip status field
+```
+
+If promotion fails (VersionConflict), another writer won — return their
+version. If chunk writes fail, clean up pending and return error.
+
+### 5.3 Read Lifecycle (GET)
+
+```
+1. Determine target version:
+   - With token: use token (read-your-writes)
+   - Without: read latest committed version (read-committed)
+2. Fetch version metadata
+3. Read all chunk shards, detect bitrot
+4. Recover if needed, return data
+```
+
+## 6. CONSISTENCY
+
+### 6.1 Read-Your-Writes
+
+A client that just wrote will see its own version on the next read:
+
+```
+PUT "foo" → ver 3 (reaches disk0, disk1; disk2 fails)
+GET "foo", token=3 → disk2 is stale → repair → return ver 3
+```
+
+Guaranteed because repair-on-read propagates the value to stale disks.
+
+### 6.2 Read-Committed
+
+Without a token, reads return the latest committed version seen on any
+healthy disk. Pending versions are invisible.
+
+```
+GET "foo" → read counter from disk0 → ver 4 → read version 4 metadata
+```
+
+A version is only visible after PromoteVersion succeeds.
+
+### 6.3 No Partial Visibility
+
+Versions are only visible after they reach the committed state, which
+requires a successful batch write to at least one healthy disk. This
+ensures readers never see partially-written objects.
+
+### 6.4 Write Conflicts
+
+Concurrent PUTs to the same key: only one PromoteVersion succeeds.
+The loser receives VersionConflict and should re-read the winner's
+version and decide whether to merge or retry.
+
+```
+Writer A: pending → chunks → Promote(A) → wins
+Writer B: pending → chunks → Promote(B) → conflict → re-read A
+```
+
+## 7. ERROR HANDLING
+
+### 7.1 Error Types
+
+| Error | Meaning | Action |
+|---|---|---|
+| `NotFound` | Key/version does not exist | Terminal |
+| `VersionConflict` | Concurrent write lost | Re-read and merge/retry |
+| `VersionNotFound` | Version in KV but shards missing | Retry |
+| `DiskFailed` | Disk permanently failed | Admin intervention |
+| `TooManyFailures` | >M disks failed for a chunk | Data lost |
+| `Transient` | I/O or KV transient error | Retry with backoff |
+
+### 7.2 Retry Strategy
+
+Retry transient errors with exponential backoff on:
+- KV read/write operations
+- Disk write operations
+- Chunk recovery operations
+
+Do NOT retry on terminal errors (NotFound, VersionConflict).
+
+## 8. CRASH RECOVERY
+
+On startup, the system scans for pending versions:
+
+1. For each pending version, check if all chunk shards exist on disk
+2. If all exist → promote to committed (idempotent)
+3. If any missing → abandon pending and log warning
+4. Run garbage collection to reclaim unreferenced chunks
+
+```
+OnRestart:
+  for pending in scan("ver:"):
+    if all_shards_exist(pending):
+      PromoteVersion(pending)
+    else:
+      DeletePending(pending)
+  GarbageCollect()
+```
+
+## 9. Garbage Collection
+
+GC reclaims chunks for versions that are no longer referenced:
+
+1. Scan all committed versions, collect referenced chunk IDs
+2. Scan all chunk metadata entries
+3. Delete chunks not in the referenced set
+
+GC is a full scan; run infrequently. Reference counting (increment on
+write, decrement on delete) is a possible optimization.
+
+## 10. CONFIGURATION
+
+```rust
+struct Config {
+    db_path: String,           // Base dir: {db_path}/disk_{i}/meta_db/
+    disk_base: String,         // Data disk base: {disk_base}/disk_{i}/
+    disk_failures: u32,        // M — tolerable disk failures
+    chunk_size: usize,         // Per-chunk size (default 64 MiB)
+    metadata_replicas: usize,  // Metadata replicas (0 = all disks)
+}
+```
+
+## 11. CORRECTNESS PROPERTIES
+
+1. **Single committed version per object** — enforced by atomic batch
+   write on promotion. No two versions can be committed simultaneously.
+
+2. **Read-your-writes** — clients carry a version token. GET with token
+   returns that version. Repair-on-read ensures the write propagates.
+
+3. **Read-committed** — without token, GET returns latest committed
+   version. Pending versions are never visible.
+
+4. **Fault tolerance** — data layer tolerates M disk failures via
+   Reed-Solomon. Metadata layer tolerates N-1 failures via full replication.
+
+5. **Bitrot immunity** — every read verifies per-shard checksums.
+   Corrupted shards are detected and corrected transparently.
+
+6. **Crash safety** — pending versions are cleaned up on restart.
+   No partial objects are visible to readers.
+
+7. **Idempotency** — GET, DELETE, and PUT (on retry) are idempotent.
