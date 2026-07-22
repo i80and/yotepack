@@ -42,6 +42,7 @@ async fn main() {
         disk_failures: cli.failures,
         chunk_size: cli.chunk_size,
         metadata_replicas: 0, // 0 = all disks
+        disk_uuids: Vec::new(),
     };
 
     tracing::info!(
@@ -94,6 +95,7 @@ mod tests {
             disk_failures: 1,
             chunk_size: 1024, // 1 KiB for fast tests
             metadata_replicas: 0, // 0 = all disks
+            disk_uuids: Vec::new(),
         }
     }
 

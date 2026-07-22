@@ -44,6 +44,8 @@ pub struct VersionMeta {
 #[derive(Debug)]
 pub struct Disk {
     pub path: std::path::PathBuf,
+    pub cluster_id: crate::cluster::ClusterId,
+    pub index: usize,
     is_failed: std::sync::Mutex<bool>,
 }
 
@@ -51,6 +53,8 @@ impl Clone for Disk {
     fn clone(&self) -> Self {
         Self {
             path: self.path.clone(),
+            cluster_id: self.cluster_id.clone(),
+            index: self.index,
             is_failed: std::sync::Mutex::new(*self.is_failed.lock().unwrap()),
         }
     }
@@ -58,10 +62,12 @@ impl Clone for Disk {
 
 impl Disk {
     /// Create a new disk at the given path.
-    pub fn new(base: &std::path::Path, index: usize) -> Self {
+    pub fn new(base: &std::path::Path, index: usize, cluster_id: crate::cluster::ClusterId) -> Self {
         let path = base.join(format!("disk_{index}"));
         Self {
             path,
+            cluster_id,
+            index,
             is_failed: std::sync::Mutex::new(false),
         }
     }
@@ -171,14 +177,48 @@ impl ChunkStore {
         let mut disks = Vec::with_capacity(num_disks);
 
         let disk_base = std::path::Path::new(&config.disk_base);
-        for i in 0..num_disks {
-            disks.push(Disk::new(disk_base, i));
+
+        // Parse UUIDs from config (may be empty → generate fresh)
+        let parsed_uuids: Vec<Option<crate::cluster::ClusterId>> = config
+            .disk_uuids
+            .iter()
+            .map(|s| {
+                uuid::Uuid::parse_str(s)
+                    .map(|u| Some(crate::cluster::ClusterId(u)))
+                    .map_err(|e| {
+                        StorageError::Transient(format!(
+                            "invalid disk UUID in config for slot {}: {e}",
+                            s
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Validate: config UUID count must match disk count
+        let config_uuid_count = parsed_uuids.len();
+        if config_uuid_count != 0 && config_uuid_count != num_disks {
+            return Err(StorageError::Transient(format!(
+                "disk_uuids count ({}) does not match total_shards ({})",
+                config_uuid_count, num_disks
+            )));
         }
 
-        for disk in &disks {
-            std::fs::create_dir_all(&disk.path).map_err(|e| {
-                StorageError::Transient(format!("failed to create disk dir: {e}"))
-            })?;
+        // Build the per-disk expected UUID list.
+        // If config is empty (fresh cluster), all entries are None → generate.
+        // If config has values, look them up by index.
+        let expected_uuids: Vec<Option<crate::cluster::ClusterId>> = (0..num_disks)
+            .map(|i| parsed_uuids.get(i).cloned().flatten())
+            .collect();
+
+        for i in 0..num_disks {
+            let expected = expected_uuids[i].clone();
+            let disk_path = disk_base.join(format!("disk_{i}"));
+
+            // Scan (or generate) the cluster ID for this disk
+            let cluster_id =
+                crate::cluster::scan_disk_cluster_id(&disk_path, &expected, i)?;
+
+            disks.push(Disk::new(disk_base, i, cluster_id));
         }
 
         Ok(Self {

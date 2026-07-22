@@ -1,3 +1,4 @@
+pub mod cluster;
 pub mod config;
 pub mod erasure;
 pub mod checksum;

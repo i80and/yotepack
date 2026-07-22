@@ -12,6 +12,10 @@ pub struct Config {
     pub chunk_size: usize,
     /// Number of metadata replicas (must be <= total_shards). 0 = all disks.
     pub metadata_replicas: usize,
+    /// Ordered list of expected disk cluster IDs, one per disk slot.
+    /// Empty list means "generate UUIDs for all disks" (fresh cluster).
+    /// Non-empty list must match total_shards() in length.
+    pub disk_uuids: Vec<String>,
 }
 
 impl Default for Config {
@@ -22,6 +26,7 @@ impl Default for Config {
             disk_failures: 1,
             chunk_size: 64 * 1024 * 1024, // 64 MiB
             metadata_replicas: 0, // 0 = all disks
+            disk_uuids: Vec::new(),
         }
     }
 }

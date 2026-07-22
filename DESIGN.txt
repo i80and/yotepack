@@ -38,6 +38,17 @@ disks in parallel; failed disks are repaired lazily.
 shards + C parity shards, one per disk. Surviving shards can reconstruct
 any missing shard via Reed-Solomon.
 
+### 2.2 Disk Identity
+
+Each physical disk carries a UUID stored in `.cluster_id` within its
+data directory. On startup the system reads each disk's UUID and validates
+it against the ordered list in configuration. Mismatches are rejected
+immediately.
+
+Fresh clusters auto-generate UUIDs for all disks. Existing clusters
+revalidate on every restart, catching the case where disks from a
+different cluster are accidentally connected.
+
 ## 3. DATA LAYER
 
 ### 3.1 Erasure Coding Parameters
@@ -76,6 +87,44 @@ reconstructs them from surviving shards. Corrected shards are written back.
 | ≤M disk failures | Erasure coding recovers missing shards |
 | M+1 disk failures | Chunk unrecoverable — `TooManyFailures` |
 | Bitrot on shard | Detected by checksum, corrected via re-encode |
+
+### 3.5 Disk Identity and Cluster Membership
+
+Each physical disk in the pool carries a UUID stored in a hidden
+`.cluster_id` file inside its data directory (`{disk_base}/disk_{i}/.cluster_id`).
+The UUID is generated on first use (v4 random) and persists across restarts.
+
+**Startup validation:**
+
+```
+Config has disk_uuids: [] → Generate UUID for each disk, write .cluster_id
+Config has disk_uuids: [u0, u1, u2] → Read each disk, reject if mismatch
+```
+
+This prevents two failure modes:
+
+1. **Wrong pool mixing**: Plugging in disks from a different cluster
+   (which would silently create a broken pool with wrong N).
+2. **Reordered disks**: Hot-swapping a disk into the wrong bay changes
+   its shard assignment, causing silent data corruption.
+
+**Replacing a failed disk**: The config still contains the original UUID
+for that disk slot. When a new (empty) disk is placed at the same
+position, the system writes the expected UUID to it, effectively cloning
+the identity. The metadata repair process (`recover_disk()`) then
+syncs the full keyspace.
+
+**Configuration**:
+
+```rust
+disk_uuids: Vec<String>  // One UUID per disk slot, in order
+// Empty → generate on fresh cluster
+// Populated → validate against on-disk UUIDs
+```
+
+No per-disk cluster map is stored. The configuration file is the single
+source of truth for disk-to-index mapping. Each disk only knows its own
+UUID.
 
 ## 4. METADATA LAYER
 
@@ -270,6 +319,7 @@ struct Config {
     disk_failures: u32,        // M — tolerable disk failures
     chunk_size: usize,         // Per-chunk size (default 64 MiB)
     metadata_replicas: usize,  // Metadata replicas (0 = all disks)
+    disk_uuids: Vec<String>,   // Disk cluster IDs, one per slot. Empty = generate.
 }
 ```
 
@@ -294,3 +344,8 @@ struct Config {
    No partial objects are visible to readers.
 
 7. **Idempotency** — GET, DELETE, and PUT (on retry) are idempotent.
+
+8. **Disk identity** — every disk carries a UUID. On startup the system
+   validates each disk's UUID against config. Mismatches are rejected
+   immediately, preventing silent data corruption from wrong-pool or
+   reordered disk connections.

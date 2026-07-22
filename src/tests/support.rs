@@ -19,6 +19,7 @@ pub fn test_dir(name: &str) -> TempDir {
 /// - M=1 (2 shards + 1 parity = 3 disks)
 /// - chunk_size=1 KiB (fast tests)
 /// - metadata_replicas=0 (all disks)
+/// - disk_uuids: empty means "generate on startup"
 pub fn make_test_config(tmp: &TempDir, disk_failures: u32, chunk_size: usize, metadata_replicas: usize) -> Config {
     Config {
         db_path: format!("{}/db", tmp.path().display()),
@@ -26,5 +27,6 @@ pub fn make_test_config(tmp: &TempDir, disk_failures: u32, chunk_size: usize, me
         disk_failures,
         chunk_size,
         metadata_replicas,
+        disk_uuids: Vec::new(),
     }
 }

@@ -445,3 +445,158 @@ fn edge_repeated_data() {
     let result = rt().block_on(storage.get("repeated", Some(token))).unwrap();
     assert_eq!(result, data);
 }
+
+// ---------------------------------------------------------------------------
+// Cluster ID validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn edge_cluster_id_fresh_generation() {
+    // Fresh disks with no config UUIDs → UUIDs are generated and written
+    let tmp = support::test_dir("edge_cluster_fresh");
+    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let storage = ObjectStorage::new(config).unwrap();
+
+    // Each disk should have a .cluster_id file with a valid UUID
+    for (i, disk) in storage.chunk_store.disks.iter().enumerate() {
+        let cluster_id_file = disk.path.join(".cluster_id");
+        assert!(
+            cluster_id_file.exists(),
+            "disk {i} missing .cluster_id file"
+        );
+        let contents = std::fs::read_to_string(&cluster_id_file).unwrap();
+        let parsed = uuid::Uuid::parse_str(contents.trim()).unwrap();
+        assert_eq!(
+            parsed, disk.cluster_id.0,
+            "disk {i} cluster ID mismatch"
+        );
+    }
+
+    // Storage should still work
+    rt().block_on(storage.put("fresh-obj", b"data")).unwrap();
+    let result = rt().block_on(storage.get("fresh-obj", None)).unwrap();
+    assert_eq!(result, b"data");
+}
+
+#[test]
+fn edge_cluster_id_explicit_config() {
+    // Create a fresh cluster, read UUIDs, then restart with explicit config.
+    // Verify that explicit config matches the on-disk UUIDs.
+    let tmp = support::test_dir("edge_cluster_explicit");
+
+    // First pass: generate UUIDs
+    let config1 = crate::Config {
+        db_path: format!("{}/db", tmp.path().display()),
+        disk_base: format!("{}/disks", tmp.path().display()),
+        disk_failures: 1,
+        chunk_size: 1024,
+        metadata_replicas: 0,
+        disk_uuids: Vec::new(),
+    };
+    let storage1 = ObjectStorage::new(config1).unwrap();
+
+    // Collect the generated UUIDs
+    let uuids: Vec<String> = storage1
+        .chunk_store
+        .disks
+        .iter()
+        .map(|d| d.cluster_id.0.to_string())
+        .collect();
+    assert_eq!(uuids.len(), 3); // N=3 for M=1
+
+    // Drop storage1 to release Fjall locks
+    drop(storage1);
+
+    // Second pass: restart with explicit config UUIDs on the same DB
+    let config2 = crate::Config {
+        db_path: format!("{}/db", tmp.path().display()),
+        disk_base: format!("{}/disks", tmp.path().display()),
+        disk_failures: 1,
+        chunk_size: 1024,
+        metadata_replicas: 0,
+        disk_uuids: uuids.clone(),
+    };
+    let storage2 = ObjectStorage::new(config2).unwrap();
+
+    // Verify UUIDs match
+    for (i, disk) in storage2.chunk_store.disks.iter().enumerate() {
+        assert_eq!(
+            disk.cluster_id.0.to_string(),
+            uuids[i],
+            "disk {i} UUID mismatch after restart"
+        );
+    }
+
+    // Verify the on-disk .cluster_id files also match
+    for (i, disk) in storage2.chunk_store.disks.iter().enumerate() {
+        let cluster_id_file = disk.path.join(".cluster_id");
+        let contents = std::fs::read_to_string(&cluster_id_file).unwrap();
+        let file_uuid = uuid::Uuid::parse_str(contents.trim()).unwrap();
+        assert_eq!(
+            file_uuid, disk.cluster_id.0,
+            "disk {i} on-disk UUID mismatch"
+        );
+    }
+}
+
+#[test]
+fn edge_cluster_id_mismatch_rejected() {
+    // Try to start with a config that has a wrong UUID → should error
+    let tmp = support::test_dir("edge_cluster_mismatch");
+
+    // First pass: generate UUIDs
+    let config1 = support::make_test_config(&tmp, 1, 1024, 0);
+    let storage1 = ObjectStorage::new(config1).unwrap();
+
+    // Build config with a modified UUID for disk 0
+    let mut uuids: Vec<String> = storage1
+        .chunk_store
+        .disks
+        .iter()
+        .map(|d| d.cluster_id.0.to_string())
+        .collect();
+    uuids[0] = uuid::Uuid::new_v4().to_string(); // wrong UUID
+
+    let config2 = crate::Config {
+        db_path: format!("{}/db", tmp.path().display()),
+        disk_base: format!("{}/disks", tmp.path().display()),
+        disk_failures: 1,
+        chunk_size: 1024,
+        metadata_replicas: 0,
+        disk_uuids: uuids,
+    };
+
+    // Should fail with ClusterIdMismatch
+    let result = ObjectStorage::new(config2);
+    assert!(result.is_err());
+    let err = match result { Ok(_) => panic!("expected error"), Err(e) => e };
+    assert!(
+        err.to_string().contains("cluster ID") || err.to_string().contains("ClusterIdMismatch"),
+        "expected ClusterIdMismatch error, got: {err}"
+    );
+}
+
+#[test]
+fn edge_cluster_id_count_mismatch_rejected() {
+    // Config with wrong number of UUIDs → should error
+    let tmp = support::test_dir("edge_cluster_count");
+    let config = support::make_test_config(&tmp, 1, 1024, 0);
+
+    // Mismatched count (1 UUID for 3 disks)
+    let config_bad = crate::Config {
+        db_path: config.db_path.clone(),
+        disk_base: config.disk_base.clone(),
+        disk_failures: config.disk_failures,
+        chunk_size: config.chunk_size,
+        metadata_replicas: config.metadata_replicas,
+        disk_uuids: vec![uuid::Uuid::new_v4().to_string()], // 1 instead of 3
+    };
+
+    let result = ObjectStorage::new(config_bad);
+    assert!(result.is_err());
+    let err = match result { Ok(_) => panic!("expected error"), Err(e) => e };
+    assert!(
+        err.to_string().contains("disk_uuids count") || err.to_string().contains("total_shards"),
+        "expected count mismatch error, got: {err}"
+    );
+}
