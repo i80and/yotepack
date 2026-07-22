@@ -178,12 +178,16 @@ impl ReplicatedMetaStore {
     }
 
     fn serialize_meta(&self, meta: &VersionMeta) -> StorageResult<Vec<u8>> {
-        let mut buf = Vec::with_capacity(33);
+        let mut buf = Vec::with_capacity(41 + meta.chunk_checksums.len() * 16);
         buf.extend_from_slice(&meta.version.to_le_bytes());
         buf.push(meta.status.to_u8());
         buf.extend_from_slice(&meta.checksum.to_le_bytes());
         buf.extend_from_slice(&(meta.data_size as u64).to_le_bytes());
-        buf.resize(33, 0);
+        // Chunk checksums: count + per-chunk checksums
+        buf.extend_from_slice(&(meta.chunk_checksums.len() as u64).to_le_bytes());
+        for cksum in &meta.chunk_checksums {
+            buf.extend_from_slice(&cksum.to_le_bytes());
+        }
         Ok(buf)
     }
 
@@ -207,6 +211,23 @@ impl ReplicatedMetaStore {
             u64::from_le_bytes(bytes[25..33].try_into().unwrap()) as usize
         } else {
             0
+        };
+
+        // Parse chunk checksums (present if bytes >= 41: 33 base + 8 count)
+        let chunk_checksums = if bytes.len() >= 41 {
+            let count = u64::from_le_bytes(bytes[33..41].try_into().unwrap()) as usize;
+            let cksum_start = 41;
+            let cksum_end = cksum_start + count * 16;
+            if bytes.len() >= cksum_end {
+                bytes[cksum_start..cksum_end]
+                    .chunks(16)
+                    .map(|chunk| u128::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
         };
 
         let chunks_key = if object_key.contains(':') {
@@ -235,6 +256,7 @@ impl ReplicatedMetaStore {
         Ok(VersionMeta {
             version: version_num,
             chunk_ids,
+            chunk_checksums,
             checksum,
             status,
             data_size,
@@ -403,6 +425,7 @@ impl ReplicatedMetaStore {
         object_key: &str,
         version: u64,
         chunk_ids: &[String],
+        chunk_checksums: &[u128],
         checksum_val: u128,
         data_size: usize,
     ) -> StorageResult<()> {
@@ -410,6 +433,7 @@ impl ReplicatedMetaStore {
         let meta = VersionMeta {
             version,
             chunk_ids: chunk_ids.to_vec(),
+            chunk_checksums: chunk_checksums.to_vec(),
             checksum: checksum_val,
             status: VersionStatus::Pending,
             data_size,

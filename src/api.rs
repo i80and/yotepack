@@ -1,10 +1,13 @@
 /// Main storage API: PUT, GET, DELETE, LIST, GarbageCollection.
 use std::collections::HashSet;
 
+use futures::AsyncReadExt;
+use futures::io::Cursor;
+
 use crate::config::Config;
 use crate::disk::{ChunkStore, VersionMeta, VersionStatus};
 use crate::errors::{StorageError, StorageResult};
-use crate::checksum;
+use crate::checksum::{self, StreamingChecksum};
 
 const CHUNK_SIZE_DEFAULT: usize = 64 * 1024 * 1024;
 
@@ -68,17 +71,27 @@ impl ObjectStorage {
         for (chunk_idx, chunk_id) in meta.chunk_ids.iter().enumerate() {
             let shard_results = self.chunk_store.read_all_shards(chunk_id);
 
-            // Decode this chunk from its shards
-            let (chunk_data, corrections) = self.chunk_store
-                .recover_chunk(chunk_id, 0, &shard_results)?;
+            // Get the expected per-chunk checksum
+            let expected_chunk_cksum = meta
+                .chunk_checksums
+                .get(chunk_idx)
+                .copied()
+                .unwrap_or(0);
 
-            // Trim last chunk if needed (it may have padding)
+            // Calculate expected (unpadded) chunk size for verification
             let is_last_chunk = chunk_idx == total_chunks - 1;
             let expected_chunk_size = if is_last_chunk {
                 data_size - (chunk_idx * self.config.chunk_size)
             } else {
                 self.config.chunk_size
             };
+
+            // Decode this chunk from its shards (verifies chunk checksum)
+            let (chunk_data, corrections) = self
+                .chunk_store
+                .recover_chunk(chunk_id, expected_chunk_cksum, expected_chunk_size, &shard_results)?;
+
+            // Trim last chunk if needed (it may have padding from erasure coding)
             let actual_chunk_size = std::cmp::min(chunk_data.len(), expected_chunk_size);
             all_data.extend_from_slice(&chunk_data[..actual_chunk_size]);
 
@@ -111,22 +124,74 @@ impl ObjectStorage {
     }
 
     // -------------------------------------------------------------------------
-    // PUT(object_key, data) -> (version_token, error)
+    // PUT(object_key, data: &[u8]) -> (version_token, error)
     // -------------------------------------------------------------------------
 
     pub async fn put(&self, object_key: &str, data: &[u8]) -> StorageResult<u64> {
-        let chunk_size = self.config.chunk_size;
+        let mut cursor = Cursor::new(data.to_vec());
+        self.put_stream(object_key, &mut cursor).await
+    }
 
-        // Phase 0: Prepare chunk layout.
-        let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
-        let mut chunk_ids: Vec<String> = Vec::with_capacity(chunks.len());
-        for _ in &chunks {
-            chunk_ids.push(uuid::Uuid::new_v4().to_string());
+    // -------------------------------------------------------------------------
+    // PUT_STREAM(object_key, reader: &mut R) -> (version_token, error)
+    //
+    // Streaming version of put that accepts any AsyncRead. Objects larger
+    // than available RAM are supported — only one chunk (~chunk_size bytes)
+    // is buffered at a time.
+    // -------------------------------------------------------------------------
+
+    pub async fn put_stream<R: futures::io::AsyncRead + Unpin + Send>(
+        &self,
+        object_key: &str,
+        reader: &mut R,
+    ) -> StorageResult<u64> {
+        let chunk_size = self.config.chunk_size;
+        let mut buf = vec![0u8; chunk_size];
+        let mut chunk_ids: Vec<String> = Vec::new();
+        let mut chunk_checksums: Vec<u128> = Vec::new();
+        let mut obj_hasher = StreamingChecksum::new();
+        let mut data_size: usize = 0;
+
+        // Phase 1: Stream chunks from reader, write each chunk's shards
+        loop {
+            let n = reader.read(&mut buf[..]).await?;
+            if n == 0 {
+                break;
+            }
+
+            let chunk_data = buf[..n].to_vec();
+            let chunk_cksum = checksum::checksum(&chunk_data);
+
+            let id = uuid::Uuid::new_v4().to_string();
+            let _disk_cksum =
+                self.chunk_store.write_chunk(&id, &chunk_data, 0)?;
+
+            obj_hasher.update(&chunk_data);
+            data_size += n;
+            chunk_ids.push(id);
+            chunk_checksums.push(chunk_cksum);
+
+            // Restore buffer for next iteration
+            buf = vec![0u8; chunk_size];
         }
 
-        let cksum = checksum::checksum(data);
+        // Phase 2: Compute final object-level checksum
+        let object_checksum = obj_hasher.finalize();
 
-        // Phase 1: Check for in-progress write.
+        if chunk_ids.is_empty() {
+            // Empty object: write pending metadata with no chunks, promote
+            let next_version = self
+                .meta_store
+                .incr_version_counter(object_key)?;
+            self.meta_store
+                .set_pending(object_key, next_version, &[], &[], object_checksum, 0)?;
+            return self
+                .meta_store
+                .promote_version(object_key, next_version)
+                .map(|_| next_version);
+        }
+
+        // Phase 3: Check for in-progress write, then set pending
         let next_version = if self.meta_store.has_pending(object_key)? {
             self.meta_store.read_latest_version(object_key)?
         } else {
@@ -134,17 +199,16 @@ impl ObjectStorage {
         };
 
         // Set pending in KV store (replicated, with repair-on-write).
-        self.meta_store
-            .set_pending(object_key, next_version, &chunk_ids, cksum, data.len())?;
+        self.meta_store.set_pending(
+            object_key,
+            next_version,
+            &chunk_ids,
+            &chunk_checksums,
+            object_checksum,
+            data_size,
+        )?;
 
-        // Phase 2: Write all chunk shards.
-        for (chunk_idx, chunk_data) in chunks.iter().enumerate() {
-            let chunk_id = chunk_ids[chunk_idx].clone();
-            self.chunk_store
-                .write_chunk(&chunk_id, chunk_data, cksum)?;
-        }
-
-        // Phase 3: Promote from pending → committed (replicated, with repair-on-write).
+        // Phase 4: Promote from pending → committed
         match self.meta_store.promote_version(object_key, next_version) {
             Ok(()) => {}
             Err(StorageError::VersionConflict) => {

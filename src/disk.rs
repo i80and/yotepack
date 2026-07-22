@@ -35,6 +35,8 @@ impl VersionStatus {
 pub struct VersionMeta {
     pub version: u64,
     pub chunk_ids: Vec<String>,
+    /// Per-chunk xxHash3-128 checksums (of chunk data before erasure encoding).
+    pub chunk_checksums: Vec<u128>,
     pub checksum: u128,
     pub status: VersionStatus,
     pub data_size: usize,
@@ -229,12 +231,16 @@ impl ChunkStore {
     }
 
     /// Encode a single chunk's data into N shards and write all shards.
+    ///
+    /// Returns the xxHash3-128 checksum of the chunk data (before erasure
+    /// encoding), for storing in `VersionMeta.chunk_checksums`.
     pub fn write_chunk(
         &self,
         chunk_id: &str,
         data: &[u8],
-        _cksum: u128, // object-level checksum, not used for shard-level verification
-    ) -> StorageResult<()> {
+        _object_cksum: u128, // passed for context; not used in erasure encoding
+    ) -> StorageResult<u128> {
+        let chunk_cksum = checksum::checksum(data);
         let k = self.coder.data_shards();
         let shard_size = data.len().div_ceil(k); // Round up
         // Reed-Solomon requires even shard sizes
@@ -267,7 +273,7 @@ impl ChunkStore {
             disk.write(chunk_id, shard_data, shard_cksum)?;
         }
 
-        Ok(())
+        Ok(chunk_cksum)
     }
 
     /// Read ALL N shards for a chunk, returning per-shard results.
@@ -299,11 +305,15 @@ impl ChunkStore {
     }
 
     /// Recover a chunk from surviving shards.
-    /// Returns (reconstructed_data, corrections).
+    ///
+    /// `expected_chunk_size` is the original (unpadded) byte count —
+    /// used to trim reconstructed data before checksum verification.
+    /// Pass 0 to skip trimming.
     pub fn recover_chunk(
         &self,
         _chunk_id: &str,
-        _expected_cksum: u128,
+        expected_chunk_checksum: u128,
+        expected_chunk_size: usize,
         shard_results: &[Result<Option<Vec<u8>>, StorageError>],
     ) -> StorageResult<(Vec<u8>, Vec<(usize, Vec<u8>)>)> {
         let mut present = vec![false; self.num_disks];
@@ -371,6 +381,22 @@ impl ChunkStore {
         let mut reconstructed_data = Vec::new();
         for ds in 0..self.coder.data_shards() {
             reconstructed_data.extend_from_slice(&all_shards[ds]);
+        }
+
+        // Trim padding that erasure coding adds to the last data shard
+        let trimmed_data = if expected_chunk_size > 0 {
+            &reconstructed_data[..expected_chunk_size]
+        } else {
+            &reconstructed_data[..]
+        };
+
+        // Verify reconstructed data against expected chunk checksum
+        let actual_cksum = checksum::checksum(trimmed_data);
+        if actual_cksum != expected_chunk_checksum {
+            return Err(StorageError::ChecksumMismatch {
+                expected: expected_chunk_checksum,
+                actual: actual_cksum,
+            });
         }
 
         // Find shards that need correction
