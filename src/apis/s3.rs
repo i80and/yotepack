@@ -24,12 +24,25 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{delete, get, head, put},
     Json, Router,
 };
+use md5::{Digest, Md5};
 use std::sync::Arc;
+
+// Parse bucket and key from a full path like "/bucket/subdir/file.txt"
+fn parse_bucket_key(full_path: &str) -> Option<(String, String)> {
+    let path = full_path.strip_prefix('/').unwrap_or(full_path);
+    let mut parts = path.splitn(2, '/');
+    let bucket = parts.next()?;
+    let key = parts.next().unwrap_or("");
+    if bucket.is_empty() {
+        return None;
+    }
+    Some((bucket.to_string(), key.to_string()))
+}
 
 use crate::api::ObjectStorage;
 use crate::errors::StorageError;
@@ -107,17 +120,17 @@ pub fn build_router(storage: Arc<ObjectStorage>) -> Router {
     let state = S3AppState { storage };
 
     Router::new()
-        // Bucket operations
+        // Bucket operations (must come first for exact match)
         .route("/", put(create_bucket))
         .route("/", get(list_buckets))
         .route("/:bucket", get(list_objects))
         .route("/:bucket", delete(delete_bucket))
         .route("/:bucket", put(create_bucket))
-        // Object operations
-        .route("/:bucket/:key*", put(put_object))
-        .route("/:bucket/:key*", get(get_object))
-        .route("/:bucket/:key*", delete(delete_object))
-        .route("/:bucket/:key*", head(head_object))
+        // Object operations (multi-segment, comes after bucket routes)
+        .route("/:bucket/*key", put(put_object))
+        .route("/:bucket/*key", get(get_object))
+        .route("/:bucket/*key", delete(delete_object))
+        .route("/:bucket/*key", head(head_object))
         .with_state(state)
 }
 
@@ -126,7 +139,7 @@ pub fn build_router(storage: Arc<ObjectStorage>) -> Router {
 // =============================================================================
 
 /// Convert `StorageError` into an Axum-compatible HTTP response.
-fn storage_error_to_response(err: StorageError) -> impl IntoResponse {
+fn storage_error_to_response(err: StorageError) -> (StatusCode, String) {
     match &err {
         StorageError::NotFound(key) => {
             (StatusCode::NOT_FOUND, format!("Not Found: {key}"))
@@ -151,6 +164,14 @@ fn storage_error_to_response(err: StorageError) -> impl IntoResponse {
             )
         }
     }
+}
+
+/// Convert a `StorageError` into an Axum-compatible response.
+fn error_to_response(err: StorageError) -> Response {
+    let (status, body) = storage_error_to_response(err);
+    let mut res = Response::new(axum::body::Body::from(body));
+    *res.status_mut() = status;
+    res
 }
 
 // =============================================================================
@@ -233,18 +254,54 @@ async fn list_objects(
 ///
 /// Upload an object to a bucket. Supports both single-shot and streaming uploads.
 async fn put_object(
-    State(state): State<S3AppState>,
+    state: State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
-    // body: Bytes,  // For future: use `axum::body::Body` for streaming
-) -> impl IntoResponse {
-    // TODO: Validate bucket exists
-    // TODO: Extract request body (support streaming for large objects)
-    // TODO: Call storage.put(&key, &data)
-    // TODO: Return ETag and version token
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!("PutObject '{bucket}/{key}' not yet implemented"),
-    )
+    req: axum::extract::Request,
+) -> Response {
+    // Validate bucket name
+    if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
+        return error_to_response(StorageError::NotFound(format!(
+            "Invalid bucket name: {bucket}"
+        )));
+    }
+
+    // Validate key
+    if key.is_empty() {
+        return error_to_response(StorageError::NotFound(
+            "Object key cannot be empty".to_string(),
+        ));
+    }
+
+    // Extract body manually
+    let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    // Build full object key (bucket/key prefix for namespacing)
+    let object_key = format!("{bucket}/{key}");
+
+    // Store the object
+    let token = match state.storage.put(&object_key, &body).await {
+        Ok(t) => t,
+        Err(e) => return error_to_response(e),
+    };
+
+    // Calculate ETag as MD5 of the body
+    let mut hasher = Md5::new();
+    hasher.update(&body);
+    let etag = format!("{:x}", hasher.finalize());
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-amz-version-id", token.to_string().parse().unwrap());
+    headers.insert("etag", etag.parse().unwrap());
+    headers.insert(
+        "content-length",
+        body.len().to_string().parse().unwrap(),
+    );
+
+    let mut res = Response::new(axum::body::Body::from(body));
+    *res.headers_mut() = headers;
+    res
 }
 
 /// GET /:bucket/:key → GetObject
@@ -253,14 +310,42 @@ async fn put_object(
 async fn get_object(
     State(state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
-) -> impl IntoResponse {
-    // TODO: Validate bucket exists
-    // TODO: Call storage.get(&key, None)
-    // TODO: Return body with appropriate headers (Content-Length, ETag, etc.)
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!("GetObject '{bucket}/{key}' not yet implemented"),
-    )
+) -> Response {
+    // Validate bucket name
+    if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
+        return error_to_response(StorageError::NotFound(format!(
+            "Invalid bucket name: {bucket}"
+        )));
+    }
+
+    // Validate key
+    if key.is_empty() {
+        return error_to_response(StorageError::NotFound(
+            "Object key cannot be empty".to_string(),
+        ));
+    }
+
+    // Build full object key
+    let object_key = format!("{bucket}/{key}");
+
+    // Retrieve the object
+    let data = match state.storage.get(&object_key, None).await {
+        Ok(d) => d,
+        Err(e) => return error_to_response(e),
+    };
+
+    // Calculate ETag
+    let mut hasher = Md5::new();
+    hasher.update(&data);
+    let etag = format!("{:x}", hasher.finalize());
+
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", data.len().to_string().parse().unwrap());
+    headers.insert("etag", etag.parse().unwrap());
+
+    let mut res = Response::new(axum::body::Body::from(data));
+    *res.headers_mut() = headers;
+    res
 }
 
 /// DELETE /:bucket/:key → DeleteObject
@@ -435,5 +520,145 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_put_object() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        let body = axum::body::Bytes::from(b"Hello, S3 world!".to_vec());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket/test.txt")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Check headers
+        let headers = response.headers();
+        assert!(headers.contains_key("etag"));
+        assert!(headers.contains_key("content-length"));
+        assert!(headers.contains_key("x-amz-version-id"));
+        assert_eq!(headers.get("content-length").unwrap(), "16");
+    }
+
+    #[tokio::test]
+    async fn test_get_object() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // First put the object
+        let put_body = axum::body::Bytes::from(b"test data for retrieval".to_vec());
+        let put_response = app.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket/retrieval.txt")
+                    .body(Body::from(put_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_response.status(), StatusCode::OK);
+
+        // Now get the object
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/mybucket/retrieval.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(get_response.status(), StatusCode::OK);
+
+        // Check headers
+        let headers = get_response.headers();
+        assert!(headers.contains_key("etag"));
+        assert!(headers.contains_key("content-length"));
+        assert_eq!(headers.get("content-length").unwrap(), "23");
+
+        // Get body
+        let body_bytes = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes, axum::body::Bytes::from(b"test data for retrieval".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_object() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/mybucket/nonexistent.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_put_large_object() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create data larger than chunk size
+        let data: Vec<u8> = (0..4096u16).map(|i| (i % 256) as u8).collect();
+        let body = axum::body::Bytes::from(data.clone());
+        let response = app.clone().oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket/large.bin")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify we can retrieve it
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/mybucket/large.bin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes, data);
     }
 }
