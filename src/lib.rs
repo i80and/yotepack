@@ -6,6 +6,7 @@ pub mod disk;
 pub mod metadata;
 pub mod api;
 pub mod errors;
+pub mod apis;
 
 pub use config::Config;
 pub use api::{ObjectStorage, ListEntry};
