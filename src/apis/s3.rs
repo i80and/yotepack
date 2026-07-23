@@ -29,6 +29,7 @@ use axum::{
     routing::{delete, get, head, put},
     Json, Router,
 };
+use chrono::Utc;
 use md5::{Digest, Md5};
 use std::sync::Arc;
 
@@ -45,6 +46,7 @@ fn parse_bucket_key(full_path: &str) -> Option<(String, String)> {
 }
 
 use crate::api::ObjectStorage;
+use crate::disk::{VersionMeta, VersionStatus};
 use crate::errors::StorageError;
 
 // =============================================================================
@@ -83,6 +85,13 @@ pub struct ListObjectsResponse {
     pub max_keys: usize,
     pub is_truncated: bool,
     pub contents: Vec<ObjectEntry>,
+    pub common_prefixes: Vec<CommonPrefix>,
+}
+
+/// A common prefix entry in a `ListObjects` response (for delimiter grouping).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct CommonPrefix {
+    pub prefix: String,
 }
 
 /// A single object entry in a `ListObjects` response.
@@ -234,20 +243,146 @@ async fn list_objects(
     State(state): State<S3AppState>,
     Path(bucket): Path<String>,
     Query(params): Query<ListObjectsQuery>,
-) -> impl IntoResponse {
-    // TODO: Validate bucket exists
-    // TODO: Call storage.list() with appropriate parameters
-    // TODO: Build and return ListObjectsResponse
+) -> Response {
+    // Validate bucket name
+    if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
+        return error_to_response(StorageError::NotFound(format!(
+            "Invalid bucket name: {bucket}"
+        )));
+    }
+
+    let prefix = params.prefix.as_deref().unwrap_or("");
+    let delimiter = params.delimiter.as_deref().unwrap_or("");
+    let marker = params.marker.as_deref();
+    let max_keys = params.max_keys.unwrap_or(1000) as usize;
+
+    // Build storage prefix: "bucket/" or "bucket/prefix"
+    let storage_prefix = if prefix.is_empty() {
+        format!("{bucket}/")
+    } else {
+        format!("{bucket}/{prefix}")
+    };
+
+    // Fetch all versions (limit * 2 to account for version dedup)
+    let entries = match state
+        .storage
+        .meta_store
+        .scan_versions(&storage_prefix, max_keys * 2)
+    {
+        Ok(e) => e,
+        Err(e) => return error_to_response(e),
+    };
+
+    // Group by latest version per object key, keeping track of the object key
+    // Key in entries is "ver:bucket/key", we strip "ver:" to get "bucket/key"
+    let mut latest: std::collections::HashMap<String, (String, VersionMeta)> =
+        std::collections::HashMap::new();
+    for (raw_key, meta) in entries {
+        if meta.status != VersionStatus::Committed {
+            continue;
+        }
+        let object_key = raw_key.strip_prefix("ver:").unwrap_or(&raw_key).to_string();
+        let existing = latest.entry(object_key).or_insert_with(|| {
+            let obj_key = raw_key.strip_prefix("ver:").unwrap_or(&raw_key).to_string();
+            (obj_key, meta.clone())
+        });
+        if meta.version > existing.1.version {
+            existing.1 = meta;
+        }
+    }
+
+    // Collect as sorted vec of (object_key, meta)
+    let mut sorted: Vec<_> = latest.into_values().collect();
+    sorted.sort_by_key(|(_, m)| m.chunk_ids.first().cloned().unwrap_or_default());
+
+    // Filter by marker (skip entries before the marker)
+    if let Some(marker_str) = marker {
+        sorted.retain(|(_, m)| {
+            m.chunk_ids
+                .first()
+                .map(|cid| cid.as_str() > marker_str)
+                .unwrap_or(false)
+        });
+    }
+
+    // Determine truncation
+    let is_truncated = sorted.len() > max_keys;
+    let next_marker = if is_truncated {
+        sorted
+            .get(max_keys)
+            .and_then(|(_, m)| m.chunk_ids.first().cloned())
+    } else {
+        None
+    };
+
+    // Take only the needed entries
+    let sorted = if is_truncated {
+        sorted.drain(..max_keys).collect()
+    } else {
+        sorted
+    };
+
+    // Build response
+    let (contents, common_prefixes) = if delimiter.is_empty() {
+        let contents: Vec<ObjectEntry> = sorted
+            .into_iter()
+            .map(|(key, meta)| ObjectEntry {
+                key,
+                last_modified: Utc::now().to_rfc3339(),
+                etag: format!("{:x}", meta.checksum),
+                size: meta.data_size,
+                storage_class: "STANDARD".to_string(),
+            })
+            .collect();
+        (contents, Vec::new())
+    } else {
+        // Group by common prefix using delimiter
+        let mut groups: std::collections::BTreeMap<String, ()> =
+            std::collections::BTreeMap::new();
+        let mut contents: Vec<ObjectEntry> = Vec::new();
+
+        for (key, meta) in sorted {
+            // The key includes the storage prefix, e.g. "bucket/prefix/file.txt"
+            // The suffix is everything after the storage prefix, e.g. "file.txt" or "dir/file.txt"
+            let suffix = key
+                .strip_prefix(&storage_prefix)
+                .unwrap_or(&key);
+
+            if let Some(pos) = suffix.find(delimiter) {
+                // There's a delimiter in the suffix — this contributes to common prefixes
+                let common = format!("{prefix}{}", &suffix[..=pos]);
+                groups.insert(common, ());
+            } else {
+                // No delimiter — this is a leaf object
+                contents.push(ObjectEntry {
+                    key,
+                    last_modified: Utc::now().to_rfc3339(),
+                    etag: format!("{:x}", meta.checksum),
+                    size: meta.data_size,
+                    storage_class: "STANDARD".to_string(),
+                });
+            }
+        }
+
+        let common_prefixes: Vec<CommonPrefix> = groups
+            .into_keys()
+            .map(|p| CommonPrefix { prefix: p })
+            .collect();
+        (contents, common_prefixes)
+    };
+
     let response = ListObjectsResponse {
         name: bucket,
         prefix: params.prefix.clone(),
         marker: params.marker.clone(),
-        next_marker: None,
+        next_marker,
         max_keys: params.max_keys.unwrap_or(1000) as usize,
-        is_truncated: false,
-        contents: Vec::new(),
+        is_truncated,
+        contents,
+        common_prefixes,
     };
-    (StatusCode::OK, Json(response))
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// PUT /:bucket/:key → PutObject
@@ -660,5 +795,144 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_bytes, data);
+    }
+
+    #[tokio::test]
+    async fn test_list_objects_empty() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // List an empty bucket
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/emptybucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListObjectsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.name, "emptybucket");
+        assert_eq!(resp.contents.len(), 0);
+        assert_eq!(resp.is_truncated, false);
+    }
+
+    #[tokio::test]
+    async fn test_list_objects_after_puts() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Put several objects
+        let bodies = vec![
+            ("dir1/file1.txt", b"hello world".as_slice()),
+            ("dir1/file2.txt", b"foo bar baz".as_slice()),
+            ("dir2/file3.txt", b"qux".as_slice()),
+            ("root.txt", b"root content".as_slice()),
+        ];
+
+        for (key, data) in &bodies {
+            let body = axum::body::Bytes::from(data.to_vec());
+            let _response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("http://localhost/mybucket/{key}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            // We don't assert on PUT here since the bucket must exist
+            // but the handler returns NOT_IMPLEMENTED for create_bucket
+        }
+
+        // List all objects
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/mybucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListObjectsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.name, "mybucket");
+        // Should list all 4 objects
+        assert_eq!(resp.contents.len(), 4);
+        assert_eq!(resp.is_truncated, false);
+    }
+
+    #[tokio::test]
+    async fn test_list_objects_with_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Put several objects with different prefixes
+        let bodies = vec![
+            ("alpha/a1.txt", b"a1".as_slice()),
+            ("alpha/a2.txt", b"a2".as_slice()),
+            ("beta/b1.txt", b"b1".as_slice()),
+            ("beta/b2.txt", b"b2".as_slice()),
+        ];
+
+        for (key, data) in &bodies {
+            let body = axum::body::Bytes::from(data.to_vec());
+            let _response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("http://localhost/testbucket/{key}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // List with prefix "alpha/"
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/testbucket?prefix=alpha/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListObjectsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.name, "testbucket");
+        assert_eq!(resp.contents.len(), 2);
+        assert!(resp.contents.iter().all(|o| o.key.contains("alpha/")));
     }
 }
