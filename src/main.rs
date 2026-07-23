@@ -6,9 +6,9 @@ use erasure_s3_storage::{Config, ObjectStorage};
 #[derive(Parser, Debug)]
 #[command(name = "erasure-s3-storage", about = "Erasure-coded S3-style object storage server")]
 struct Cli {
-    /// Base directory for storage
-    #[arg(short, long, default_value = "./storage")]
-    storage: String,
+    /// Disk paths (one per shard, required). Total = disk_failures*2 + 1.
+    #[arg(short, long, num_args = 1..)]
+    disk: Vec<String>,
 
     /// Number of tolerable disk failures
     #[arg(short, long, default_value = "1")]
@@ -34,10 +34,17 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
-    let base = cli.storage;
+    let expected_shards = cli.failures * 2 + 1;
+    if cli.disk.len() != expected_shards as usize {
+        eprintln!(
+            "Error: --disk requires {} paths (for M={} failures), got {}",
+            expected_shards, cli.failures, cli.disk.len()
+        );
+        std::process::exit(1);
+    }
 
     let config = Config {
-        base_path: base,
+        disk_paths: cli.disk,
         disk_failures: cli.failures,
         chunk_size: cli.chunk_size,
         metadata_replicas: 0, // 0 = all disks
@@ -45,10 +52,10 @@ async fn main() {
     };
 
     tracing::info!(
-        "Starting erasure-coded storage server with config: M={}, chunks={}, total_shards={}",
+        "Starting erasure-coded storage server with config: M={}, shards={}, chunks={}",
         config.disk_failures,
-        config.chunk_size,
-        config.total_shards()
+        config.total_shards(),
+        config.chunk_size
     );
 
     // Create storage instance
@@ -88,8 +95,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_test_config(tmp: &TempDir) -> Config {
+        let n = 3; // M=1: K=2 data shards + C=1 parity shard = 3 total
+        let disk_paths: Vec<String> = (0..n)
+            .map(|i| tmp.path().join(format!("disk_{i}")))
+            .into_iter()
+            .map(|p| p.display().to_string())
+            .collect();
         Config {
-            base_path: tmp.path().display().to_string(),
+            disk_paths,
             disk_failures: 1,
             chunk_size: 1024, // 1 KiB for fast tests
             metadata_replicas: 0, // 0 = all disks

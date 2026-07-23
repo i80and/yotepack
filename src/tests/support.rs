@@ -16,13 +16,20 @@ pub fn test_dir(name: &str) -> TempDir {
 
 /// Create a test config with defaults suitable for smoke/fuzz tests.
 ///
-/// - M=1 (2 shards + 1 parity = 3 disks)
-/// - chunk_size=1 KiB (fast tests)
-/// - metadata_replicas=0 (all disks)
+/// Creates one temp directory per shard slot.
+/// - M = disk_failures, K = M+1 data shards, C = M parity shards, N = 2M+1 total shards
+/// - chunk_size = custom
+/// - metadata_replicas = custom
 /// - disk_uuids: empty means "generate on startup"
 pub fn make_test_config(tmp: &TempDir, disk_failures: u32, chunk_size: usize, metadata_replicas: usize) -> Config {
+    let n = disk_failures * 2 + 1;
+    let disk_paths: Vec<String> = (0..n)
+        .map(|i| tmp.path().join(format!("disk_{i}")))
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
     Config {
-        base_path: tmp.path().display().to_string(),
+        disk_paths,
         disk_failures,
         chunk_size,
         metadata_replicas,

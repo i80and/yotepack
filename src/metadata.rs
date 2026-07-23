@@ -30,12 +30,14 @@ pub struct ReplicatedMetaStore {
 impl ReplicatedMetaStore {
     /// Open (or create) one Fjall database per disk.
     pub fn new(config: &Config) -> StorageResult<Self> {
+        config.validate().map_err(StorageError::Transient)?;
+
         let n = config.effective_replicas();
         let mut dbs = HashMap::with_capacity(n);
         let mut ks = HashMap::with_capacity(n);
 
         for i in 0..n {
-            let disk_db_path = format!("{}/disk_{i}/metadata", config.base_path);
+            let disk_db_path = format!("{}/metadata", config.disk_paths[i]);
             let db = Database::builder(&disk_db_path).open()?;
             let keyspace = db.keyspace("main", KeyspaceCreateOptions::default)?;
             dbs.insert(i, db);

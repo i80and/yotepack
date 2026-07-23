@@ -19,7 +19,6 @@ fn rt() -> &'static tokio::runtime::Runtime {
 fn edge_single_shard_bitrot() {
     let tmp = support::test_dir("edge_shard_bitrot");
     let config = support::make_test_config(&tmp, 1, 1024, 0);
-    let disk_base = config.base_path.clone();
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write an object
@@ -38,7 +37,8 @@ fn edge_single_shard_bitrot() {
         .chunk_ids[0]
         .clone();
 
-    let shard_path = format!("{}/disk_0/shards/{}", disk_base, chunk_id);
+    let disk_path = &storage.chunk_store.disks[0].path;
+    let shard_path = disk_path.join("shards").join(&chunk_id);
     let shard_data = std::fs::read(&shard_path).unwrap();
     let mut corrupted = shard_data.clone();
     // Flip a bit in the middle
@@ -58,7 +58,6 @@ fn edge_single_shard_bitrot() {
 fn edge_shard_zeroed() {
     let tmp = support::test_dir("edge_shard_zeroed");
     let config = support::make_test_config(&tmp, 1, 1024, 0);
-    let disk_base = config.base_path.clone();
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| (i % 256) as u8).collect();
@@ -76,7 +75,8 @@ fn edge_shard_zeroed() {
         .chunk_ids[0]
         .clone();
 
-    let shard_path = format!("{}/disk_0/shards/{}", disk_base, chunk_id);
+    let disk_path = &storage.chunk_store.disks[0].path;
+    let shard_path = disk_path.join("shards").join(&chunk_id);
     let shard_data = std::fs::read(&shard_path).unwrap();
     std::fs::write(&shard_path, vec![0u8; shard_data.len()]).unwrap();
 
@@ -89,7 +89,6 @@ fn edge_shard_zeroed() {
 fn edge_shard_truncated() {
     let tmp = support::test_dir("edge_shard_trunc");
     let config = support::make_test_config(&tmp, 1, 1024, 0);
-    let disk_base = config.base_path.clone();
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| i as u8).collect();
@@ -106,7 +105,8 @@ fn edge_shard_truncated() {
         .chunk_ids[0]
         .clone();
 
-    let shard_path = format!("{}/disk_0/shards/{}", disk_base, chunk_id);
+    let disk_path = &storage.chunk_store.disks[0].path;
+    let shard_path = disk_path.join("shards").join(&chunk_id);
     std::fs::write(&shard_path, vec![42u8]).unwrap();
 
     // Recovery should work
@@ -118,7 +118,6 @@ fn edge_shard_truncated() {
 fn edge_shard_missing() {
     let tmp = support::test_dir("edge_shard_missing");
     let config = support::make_test_config(&tmp, 1, 1024, 0);
-    let disk_base = config.base_path.clone();
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| i as u8).collect();
@@ -135,7 +134,8 @@ fn edge_shard_missing() {
         .chunk_ids[0]
         .clone();
 
-    let shard_path = format!("{}/disk_0/shards/{}", disk_base, chunk_id);
+    let disk_path = &storage.chunk_store.disks[0].path;
+    let shard_path = disk_path.join("shards").join(&chunk_id);
     let _ = std::fs::remove_file(&shard_path);
 
     // Recovery should work
@@ -152,7 +152,6 @@ fn edge_two_shard_failures_recovered() {
     let tmp = support::test_dir("edge_two_failures");
     // Use M=2 to tolerate 2 disk failures
     let config = support::make_test_config(&tmp, 2, 1024, 0);
-    let disk_base = config.base_path.clone();
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
@@ -171,7 +170,8 @@ fn edge_two_shard_failures_recovered() {
         .clone();
 
     for disk_idx in 0..2 {
-        let shard_path = format!("{}/disk_{}/shards/{}", disk_base, disk_idx, chunk_id);
+        let disk_path = &storage.chunk_store.disks[disk_idx].path;
+        let shard_path = disk_path.join("shards").join(&chunk_id);
         let shard_data = std::fs::read(&shard_path).unwrap();
         let mut corrupted = shard_data.clone();
         // Flip all bits
@@ -191,7 +191,6 @@ fn edge_three_shard_failures_exceeds_tolerance() {
     let tmp = support::test_dir("edge_three_failures");
     // Use M=2 — only tolerates 2 failures, 3 should fail
     let config = support::make_test_config(&tmp, 2, 1024, 0);
-    let disk_base = config.base_path.clone();
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
@@ -206,7 +205,8 @@ fn edge_three_shard_failures_exceeds_tolerance() {
         .clone();
 
     for disk_idx in 0..3 {
-        let shard_path = format!("{}/disk_{}/shards/{}", disk_base, disk_idx, chunk_id);
+        let disk_path = &storage.chunk_store.disks[disk_idx].path;
+        let shard_path = disk_path.join("shards").join(&chunk_id);
         let shard_data = std::fs::read(&shard_path).unwrap();
         let mut corrupted = shard_data.clone();
         for byte in corrupted.iter_mut() {
@@ -485,8 +485,14 @@ fn edge_cluster_id_explicit_config() {
     let tmp = support::test_dir("edge_cluster_explicit");
 
     // First pass: generate UUIDs
+    let n = 1 * 2 + 1; // M=1, N=3
+    let disk_paths: Vec<String> = (0..n)
+        .map(|i| tmp.path().join(format!("disk_{i}")))
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
     let config1 = crate::Config {
-        base_path: tmp.path().display().to_string(),
+        disk_paths: disk_paths.clone(),
         disk_failures: 1,
         chunk_size: 1024,
         metadata_replicas: 0,
@@ -508,7 +514,7 @@ fn edge_cluster_id_explicit_config() {
 
     // Second pass: restart with explicit config UUIDs on the same DB
     let config2 = crate::Config {
-        base_path: tmp.path().display().to_string(),
+        disk_paths,
         disk_failures: 1,
         chunk_size: 1024,
         metadata_replicas: 0,
@@ -555,8 +561,15 @@ fn edge_cluster_id_mismatch_rejected() {
         .collect();
     uuids[0] = uuid::Uuid::new_v4().to_string(); // wrong UUID
 
+    let disk_paths: Vec<String> = storage1
+        .chunk_store
+        .disks
+        .iter()
+        .map(|d| d.path.to_string_lossy().to_string())
+        .collect();
+
     let config2 = crate::Config {
-        base_path: tmp.path().display().to_string(),
+        disk_paths,
         disk_failures: 1,
         chunk_size: 1024,
         metadata_replicas: 0,
@@ -581,7 +594,7 @@ fn edge_cluster_id_count_mismatch_rejected() {
 
     // Mismatched count (1 UUID for 3 disks)
     let config_bad = crate::Config {
-        base_path: config.base_path.clone(),
+        disk_paths: config.disk_paths.clone(),
         disk_failures: config.disk_failures,
         chunk_size: config.chunk_size,
         metadata_replicas: config.metadata_replicas,

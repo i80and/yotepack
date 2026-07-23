@@ -639,8 +639,14 @@ mod tests {
     use tower::util::ServiceExt;
 
     fn make_test_config(tmp: &TempDir) -> Config {
+        let n = 1 * 2 + 1; // M=1, N=3
+        let disk_paths: Vec<String> = (0..n)
+            .map(|i| tmp.path().join(format!("disk_{i}")))
+            .into_iter()
+            .map(|p| p.display().to_string())
+            .collect();
         Config {
-            base_path: tmp.path().display().to_string(),
+            disk_paths,
             disk_failures: 1,
             chunk_size: 1024,
             metadata_replicas: 0,
