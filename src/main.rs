@@ -190,4 +190,131 @@ mod tests {
         let result = storage.get("multi-chunk", Some(token)).await.unwrap();
         assert_eq!(result, data);
     }
+
+    #[tokio::test]
+    async fn test_set_get_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        storage.put("key", b"data").await.unwrap();
+
+        // Set metadata
+        storage
+            .set_metadata_value("key", "content-type", "text/plain")
+            .unwrap();
+
+        // Get metadata back
+        let value = storage.get_metadata_value("key", "content-type").unwrap();
+        assert_eq!(value, Some("text/plain".to_string()));
+
+        // Verify the data is still readable
+        let result = storage.get("key", None).await.unwrap();
+        assert_eq!(result, b"data");
+    }
+
+    #[tokio::test]
+    async fn test_metadata_content_type() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        storage.put("img.png", b"image data").await.unwrap();
+
+        // Set content type
+        storage.set_content_type("img.png", "image/png").unwrap();
+
+        // Get content type back
+        let ct = storage.get_content_type("img.png").unwrap();
+        assert_eq!(ct, Some("image/png".to_string()));
+
+        // Non-existent key should return None
+        let ct2 = storage.get_content_type("nonexistent").unwrap();
+        assert_eq!(ct2, None);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_cache_control() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        storage.put("file.txt", b"text data").await.unwrap();
+
+        // Set cache control
+        storage
+            .set_cache_control("file.txt", "max-age=3600")
+            .unwrap();
+
+        // Get cache control back
+        let cc = storage.get_cache_control("file.txt").unwrap();
+        assert_eq!(cc, Some("max-age=3600".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_metadata_acl() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        storage.put("private.txt", b"secret").await.unwrap();
+
+        // Set ACL (private)
+        let acl = serde_json::json!({ "grants": [{"user": "admin", "permission": "WRITE"}]});
+        storage.set_acl("private.txt", &acl).unwrap();
+
+        // Get ACL back
+        let retrieved_acl = storage.get_acl("private.txt").unwrap();
+        assert!(retrieved_acl.is_some());
+        assert_eq!(retrieved_acl.unwrap(), acl);
+
+        // Non-existent key should return None
+        let acl2 = storage.get_acl("nonexistent").unwrap();
+        assert_eq!(acl2, None);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_case_insensitive() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        storage.put("key", b"data").await.unwrap();
+
+        // Set metadata with mixed case
+        storage
+            .set_metadata_value("key", "Content-Type", "application/json")
+            .unwrap();
+
+        // Should be retrievable with any case
+        let val1 = storage.get_metadata_value("key", "content-type").unwrap();
+        assert_eq!(val1, Some("application/json".to_string()));
+
+        let val2 = storage.get_metadata_value("key", "CONTENT-TYPE").unwrap();
+        assert_eq!(val2, Some("application/json".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_metadata_persists_with_data() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        storage.put("key", b"data").await.unwrap();
+        storage
+            .set_metadata_value("key", "custom", "value123")
+            .unwrap();
+
+        // Data should still be readable
+        let result = storage.get("key", None).await.unwrap();
+        assert_eq!(result, b"data");
+
+        // Metadata should be intact
+        let value = storage.get_metadata_value("key", "custom").unwrap();
+        assert_eq!(value, Some("value123".to_string()));
+
+        // List should still work (check for any non-empty entry)
+        let entries = storage.list("", None, 100).unwrap();
+        assert!(!entries.is_empty());
+    }
 }

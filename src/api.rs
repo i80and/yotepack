@@ -184,7 +184,7 @@ impl ObjectStorage {
                 .meta_store
                 .incr_version_counter(object_key)?;
             self.meta_store
-                .set_pending(object_key, next_version, &[], &[], object_checksum, 0)?;
+                .set_pending(object_key, next_version, &[], &[], object_checksum, 0, std::collections::HashMap::new())?;
             return self
                 .meta_store
                 .promote_version(object_key, next_version)
@@ -206,6 +206,7 @@ impl ObjectStorage {
             &chunk_checksums,
             object_checksum,
             data_size,
+            std::collections::HashMap::new(),
         )?;
 
         // Phase 4: Promote from pending → committed
@@ -408,6 +409,140 @@ impl ObjectStorage {
     pub fn is_meta_safe(&self) -> bool {
         self.meta_store.is_safe()
     }
+
+    // -------------------------------------------------------------------------
+    // Object Metadata
+    // -------------------------------------------------------------------------
+
+    /// Get the full metadata map for an object version.
+    pub fn get_object_metadata(
+        &self,
+        object_key: &str,
+    ) -> StorageResult<std::collections::HashMap<String, String>> {
+        let meta = match self.meta_store.read_version(object_key) {
+            Ok(m) => m,
+            Err(StorageError::NotFound(_)) => {
+                return Ok(std::collections::HashMap::new())
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(meta.metadata)
+    }
+
+    /// Get a single metadata value by key (case-insensitive).
+    pub fn get_metadata_value(
+        &self,
+        object_key: &str,
+        key: &str,
+    ) -> StorageResult<Option<String>> {
+        let meta = match self.meta_store.read_version(object_key) {
+            Ok(m) => m,
+            Err(StorageError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(meta
+            .metadata
+            .get(key.to_lowercase().as_str())
+            .cloned())
+    }
+
+    /// Set a single metadata key-value pair on the latest version of an object.
+    /// Keys are stored in lowercase.
+    pub fn set_metadata_value(
+        &self,
+        object_key: &str,
+        key: &str,
+        value: &str,
+    ) -> StorageResult<()> {
+        let latest_version = self.meta_store.read_latest_version(object_key)?;
+        let meta = self
+            .meta_store
+            .read_version_by_number(object_key, latest_version)?;
+
+        let mut new_meta = meta.clone();
+        new_meta
+            .metadata
+            .insert(key.to_lowercase(), value.to_string());
+
+        // Re-serialize and write back
+        let ver_key = format!("ver:{object_key}:{latest_version}");
+        let serialized = self.meta_store.serialize_meta(&new_meta)?;
+        let chunks_key = format!("{ver_key}:chunks");
+        self.meta_store.write_batch(vec![
+            (ver_key, serialized),
+            (chunks_key, serialize_chunk_ids(&new_meta.chunk_ids)),
+        ])
+    }
+
+    /// Get the Content-Type of an object.
+    pub fn get_content_type(&self, object_key: &str) -> StorageResult<Option<String>> {
+        self.get_metadata_value(object_key, "content-type")
+    }
+
+    /// Set the Content-Type of an object.
+    pub fn set_content_type(
+        &self,
+        object_key: &str,
+        content_type: &str,
+    ) -> StorageResult<()> {
+        self.set_metadata_value(object_key, "content-type", content_type)
+    }
+
+    /// Get the ACL (access control list) of an object.
+    ///
+    /// The ACL is stored as a JSON string. This method parses it and returns
+    /// the parsed value, or `None` if no ACL is set.
+    pub fn get_acl(&self, object_key: &str) -> StorageResult<Option<serde_json::Value>> {
+        if let Some(acl_str) = self.get_metadata_value(object_key, "x-amz-acl")? {
+            Ok(Some(
+                serde_json::from_str(&acl_str).map_err(|e| {
+                    StorageError::KvError(format!("parse ACL: {e}"))
+                })?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Set the ACL of an object.
+    ///
+    /// The ACL value is serialized as a JSON string and stored under the key
+    /// `x-amz-acl`.
+    pub fn set_acl(
+        &self,
+        object_key: &str,
+        acl: &serde_json::Value,
+    ) -> StorageResult<()> {
+        let acl_json = serde_json::to_string(acl)
+            .map_err(|e| StorageError::KvError(format!("serialize ACL: {e}")))?;
+        self.set_metadata_value(object_key, "x-amz-acl", &acl_json)
+    }
+
+    /// Get the Cache-Control header of an object.
+    pub fn get_cache_control(&self, object_key: &str) -> StorageResult<Option<String>> {
+        self.get_metadata_value(object_key, "cache-control")
+    }
+
+    /// Set the Cache-Control header of an object.
+    pub fn set_cache_control(
+        &self,
+        object_key: &str,
+        cache_control: &str,
+    ) -> StorageResult<()> {
+        self.set_metadata_value(object_key, "cache-control", cache_control)
+    }
+}
+
+/// Helper to serialize chunk IDs (needed for metadata update ops).
+fn serialize_chunk_ids(chunk_ids: &[String]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&(chunk_ids.len() as u64).to_le_bytes());
+    for cid in chunk_ids {
+        let cid_bytes = cid.as_bytes();
+        buf.extend_from_slice(&(cid_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(cid_bytes);
+    }
+    buf
 }
 
 /// An entry returned by LIST operations.

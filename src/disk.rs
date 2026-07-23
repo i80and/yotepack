@@ -40,6 +40,9 @@ pub struct VersionMeta {
     pub checksum: u128,
     pub status: VersionStatus,
     pub data_size: usize,
+    /// Arbitrary user-defined metadata (e.g., Content-Type, ACL, custom headers).
+    /// Keys are lowercase; values may be any string.
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// A single physical disk.

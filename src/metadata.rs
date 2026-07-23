@@ -173,12 +173,17 @@ impl ReplicatedMetaStore {
             )));
         };
 
-        let meta = self.deserialize_version_meta(&value_bytes, &ver_key)?;
+        let meta = self.deserialize_meta(&value_bytes, &ver_key)?;
         Ok((meta.version, meta))
     }
 
-    fn serialize_meta(&self, meta: &VersionMeta) -> StorageResult<Vec<u8>> {
-        let mut buf = Vec::with_capacity(41 + meta.chunk_checksums.len() * 16);
+    /// Serialize a `VersionMeta` into bytes for storage. Used when updating metadata.
+    pub fn serialize_meta(&self, meta: &VersionMeta) -> StorageResult<Vec<u8>> {
+        // Serialize metadata map as JSON
+        let meta_json = serde_json::to_string(&meta.metadata)
+            .map_err(|e| StorageError::KvError(format!("serialize metadata: {e}")))?;
+        let meta_json_len = meta_json.len();
+        let mut buf = Vec::with_capacity(41 + meta.chunk_checksums.len() * 16 + 4 + meta_json_len);
         buf.extend_from_slice(&meta.version.to_le_bytes());
         buf.push(meta.status.to_u8());
         buf.extend_from_slice(&meta.checksum.to_le_bytes());
@@ -188,10 +193,13 @@ impl ReplicatedMetaStore {
         for cksum in &meta.chunk_checksums {
             buf.extend_from_slice(&cksum.to_le_bytes());
         }
+        // Metadata: length-prefixed JSON (always present in new format)
+        buf.extend_from_slice(&(meta_json_len as u32).to_le_bytes());
+        buf.extend_from_slice(meta_json.as_bytes());
         Ok(buf)
     }
 
-    fn deserialize_version_meta(
+    fn deserialize_meta(
         &self,
         bytes: &[u8],
         object_key: &str,
@@ -253,6 +261,29 @@ impl ReplicatedMetaStore {
             })
             .unwrap_or_default();
 
+        // Parse metadata: length-prefixed JSON at the end of the record.
+        let meta_checksums_end = 41 + chunk_checksums.len() * 16;
+        let metadata = if bytes.len() >= meta_checksums_end + 4 {
+            let meta_len = u32::from_le_bytes(
+                bytes[meta_checksums_end..meta_checksums_end + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let json_start = meta_checksums_end + 4;
+            let json_end = json_start + meta_len;
+            if meta_len == 0 || (json_start <= bytes.len() && json_end <= bytes.len()) {
+                if meta_len > 0 {
+                    serde_json::from_slice(&bytes[json_start..json_end]).unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                }
+            } else {
+                std::collections::HashMap::new()
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
         Ok(VersionMeta {
             version: version_num,
             chunk_ids,
@@ -260,6 +291,7 @@ impl ReplicatedMetaStore {
             checksum,
             status,
             data_size,
+            metadata,
         })
     }
 
@@ -428,6 +460,7 @@ impl ReplicatedMetaStore {
         chunk_checksums: &[u128],
         checksum_val: u128,
         data_size: usize,
+        metadata: std::collections::HashMap<String, String>,
     ) -> StorageResult<()> {
         let ver_key = format!("ver:{object_key}:{version}");
         let meta = VersionMeta {
@@ -437,6 +470,7 @@ impl ReplicatedMetaStore {
             checksum: checksum_val,
             status: VersionStatus::Pending,
             data_size,
+            metadata,
         };
 
         let mut ops = Vec::new();
@@ -463,7 +497,7 @@ impl ReplicatedMetaStore {
 
         // Read the current value from any healthy disk to verify it's pending
         let value = self.read(ver_key.as_bytes())?;
-        let meta = self.deserialize_version_meta(&value, &ver_key)?;
+        let meta = self.deserialize_meta(&value, &ver_key)?;
 
         if meta.status != VersionStatus::Pending || meta.version != target_version {
             return Err(StorageError::VersionConflict);
@@ -519,7 +553,7 @@ impl ReplicatedMetaStore {
         let chunks_key = format!("{ver_key}:chunks");
 
         let value = self.read(ver_key.as_bytes())?;
-        let mut meta = self.deserialize_version_meta(&value, &ver_key)?;
+        let mut meta = self.deserialize_meta(&value, &ver_key)?;
         meta.status = VersionStatus::Deleted;
 
         let mut ops = Vec::new();
@@ -573,7 +607,7 @@ impl ReplicatedMetaStore {
                 }
                 seen_keys.insert(key.clone());
 
-                let meta = self.deserialize_version_meta(&value_bytes, &key)?;
+                let meta = self.deserialize_meta(&value_bytes, &key)?;
                 results.push((key, meta));
             }
         }
@@ -616,7 +650,7 @@ impl ReplicatedMetaStore {
             if key.ends_with(":chunks") {
                 continue;
             }
-            if let Ok(meta) = self.deserialize_version_meta(&value_bytes, &key) {
+            if let Ok(meta) = self.deserialize_meta(&value_bytes, &key) {
                 if meta.status == VersionStatus::Pending {
                     return Ok(true);
                 }
