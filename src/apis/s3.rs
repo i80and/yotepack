@@ -489,13 +489,33 @@ async fn get_object(
 async fn delete_object(
     State(state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
-) -> impl IntoResponse {
-    // TODO: Validate bucket exists
-    // TODO: Call storage.delete(&key)
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!("DeleteObject '{bucket}/{key}' not yet implemented"),
-    )
+) -> Response {
+    // Validate bucket name
+    if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
+        return error_to_response(StorageError::NotFound(format!(
+            "Invalid bucket name: {bucket}"
+        )));
+    }
+
+    // Validate key
+    if key.is_empty() {
+        return error_to_response(StorageError::NotFound(
+            "Object key cannot be empty".to_string(),
+        ));
+    }
+
+    // Build full object key
+    let object_key = format!("{bucket}/{key}");
+
+    // Delete the object
+    match state.storage.delete(&object_key) {
+        Ok(()) => {
+            let mut res = Response::new(axum::body::Body::empty());
+            *res.status_mut() = StatusCode::NO_CONTENT;
+            res
+        }
+        Err(e) => error_to_response(e),
+    }
 }
 
 /// HEAD /:bucket/:key → HeadObject
@@ -795,6 +815,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_bytes, data);
+    }
+
+    #[tokio::test]
+    async fn test_delete_object() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Put an object
+        let body = axum::body::Bytes::from(b"to be deleted".to_vec());
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket/delete-test.txt")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify it exists
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/mybucket/delete-test.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+
+        // Delete it
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("http://localhost/mybucket/delete-test.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's gone
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/mybucket/delete-test.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
