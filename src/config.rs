@@ -52,9 +52,7 @@ impl Config {
                 self.total_shards()
             ));
         }
-        if !self.disk_uuids.is_empty()
-            && self.disk_uuids.len() != self.total_shards()
-        {
+        if !self.disk_uuids.is_empty() && self.disk_uuids.len() != self.total_shards() {
             return Err(format!(
                 "disk_uuids count ({}) does not match total_shards ({})",
                 self.disk_uuids.len(),

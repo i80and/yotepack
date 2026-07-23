@@ -1,19 +1,19 @@
+pub mod api;
+pub mod apis;
+pub mod checksum;
 pub mod cluster;
 pub mod config;
-pub mod erasure;
-pub mod checksum;
 pub mod disk;
-pub mod metadata;
-pub mod api;
+pub mod erasure;
 pub mod errors;
-pub mod apis;
+pub mod metadata;
 
+pub use api::{ListEntry, ObjectStorage};
 pub use config::Config;
-pub use api::{ObjectStorage, ListEntry};
 pub use disk::{ChunkStore, Disk};
 pub use erasure::ErasureCoder;
-pub use metadata::ReplicatedMetaStore;
 pub use errors::{StorageError, StorageResult};
+pub use metadata::ReplicatedMetaStore;
 
 #[cfg(test)]
 mod tests;

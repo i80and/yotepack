@@ -4,7 +4,10 @@ use clap::Parser;
 use erasure_s3_storage::{Config, ObjectStorage};
 
 #[derive(Parser, Debug)]
-#[command(name = "erasure-s3-storage", about = "Erasure-coded S3-style object storage server")]
+#[command(
+    name = "erasure-s3-storage",
+    about = "Erasure-coded S3-style object storage server"
+)]
 struct Cli {
     /// Disk paths (one per shard, required). Total = disk_failures*2 + 1.
     #[arg(short, long, num_args = 1..)]
@@ -38,7 +41,9 @@ async fn main() {
     if cli.disk.len() != expected_shards as usize {
         eprintln!(
             "Error: --disk requires {} paths (for M={} failures), got {}",
-            expected_shards, cli.failures, cli.disk.len()
+            expected_shards,
+            cli.failures,
+            cli.disk.len()
         );
         std::process::exit(1);
     }
@@ -104,7 +109,7 @@ mod tests {
         Config {
             disk_paths,
             disk_failures: 1,
-            chunk_size: 1024, // 1 KiB for fast tests
+            chunk_size: 1024,     // 1 KiB for fast tests
             metadata_replicas: 0, // 0 = all disks
             disk_uuids: Vec::new(),
         }

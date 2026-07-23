@@ -6,9 +6,9 @@
 use std::sync::OnceLock;
 
 use crate::disk::VersionStatus;
-use crate::StorageError;
 use crate::tests::support;
 use crate::ObjectStorage;
+use crate::StorageError;
 
 /// Reusable tokio runtime for blocking async operations.
 fn rt() -> &'static tokio::runtime::Runtime {
@@ -44,13 +44,16 @@ fn smoke_put_get_multiple_objects() {
     let tokens: Vec<u64> = (0..10)
         .map(|i| {
             let data = format!("object-{i}").into_bytes();
-            rt().block_on(storage.put(&format!("key-{i}"), &data)).unwrap()
+            rt().block_on(storage.put(&format!("key-{i}"), &data))
+                .unwrap()
         })
         .collect();
 
     // Read all back with tokens
     for (i, token) in tokens.iter().enumerate() {
-        let result = rt().block_on(storage.get(&format!("key-{i}"), Some(*token))).unwrap();
+        let result = rt()
+            .block_on(storage.get(&format!("key-{i}"), Some(*token)))
+            .unwrap();
         assert_eq!(result, format!("object-{i}").into_bytes());
     }
 }
@@ -123,7 +126,10 @@ fn smoke_version_monotonicity() {
     for i in 0..5 {
         let data = format!("version-{i}").into_bytes();
         let version = rt().block_on(storage.put("mono-key", &data)).unwrap();
-        assert!(version > prev_version, "version {version} should be > {prev_version}");
+        assert!(
+            version > prev_version,
+            "version {version} should be > {prev_version}"
+        );
         prev_version = version;
     }
 }
@@ -201,7 +207,8 @@ fn smoke_list_limit() {
     let storage = ObjectStorage::new(config).unwrap();
 
     for i in 0..10 {
-        rt().block_on(storage.put(&format!("obj-{i}"), b"data")).unwrap();
+        rt().block_on(storage.put(&format!("obj-{i}"), b"data"))
+            .unwrap();
     }
 
     let entries = storage.list("", None, 3).unwrap();
@@ -273,7 +280,8 @@ fn smoke_meta_persist() {
     let config = support::make_test_config(&tmp, 1, 1024, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("persist-key", b"persist-data")).unwrap();
+    rt().block_on(storage.put("persist-key", b"persist-data"))
+        .unwrap();
 
     // Persist all metadata databases (verify it doesn't error)
     storage.meta_store.persist().unwrap();
@@ -311,7 +319,8 @@ fn smoke_startup_recovery() {
     // Write and commit an object
     {
         let storage = ObjectStorage::new(config.clone()).unwrap();
-        rt().block_on(storage.put("recover-key", b"recover-data")).unwrap();
+        rt().block_on(storage.put("recover-key", b"recover-data"))
+            .unwrap();
     }
 
     // Reopen — data should survive

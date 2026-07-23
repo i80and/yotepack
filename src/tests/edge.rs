@@ -284,7 +284,8 @@ fn edge_multiple_pending_versions() {
         let storage = ObjectStorage::new(config.clone()).unwrap();
         for i in 0..5 {
             let data = format!("obj-{i}").into_bytes();
-            rt().block_on(storage.put(&format!("key-{i}"), &data)).unwrap();
+            rt().block_on(storage.put(&format!("key-{i}"), &data))
+                .unwrap();
         }
     }
 
@@ -296,7 +297,9 @@ fn edge_multiple_pending_versions() {
     // All objects should be readable
     for i in 0..5 {
         let data = format!("obj-{i}").into_bytes();
-        let result = rt().block_on(storage.get(&format!("key-{i}"), None)).unwrap();
+        let result = rt()
+            .block_on(storage.get(&format!("key-{i}"), None))
+            .unwrap();
         assert_eq!(result, data);
     }
 }
@@ -376,7 +379,9 @@ fn edge_rapid_concurrent_writes_same_key() {
         last_version = version;
 
         // Each version should be independently readable with its token
-        let result = rt().block_on(storage.get("rapid-key", Some(version))).unwrap();
+        let result = rt()
+            .block_on(storage.get("rapid-key", Some(version)))
+            .unwrap();
         assert_eq!(result, data);
     }
 
@@ -429,7 +434,9 @@ fn edge_null_byte_object() {
 
     let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
     let token = rt().block_on(storage.put("all-bytes", &data)).unwrap();
-    let result = rt().block_on(storage.get("all-bytes", Some(token))).unwrap();
+    let result = rt()
+        .block_on(storage.get("all-bytes", Some(token)))
+        .unwrap();
     assert_eq!(result, data);
 }
 
@@ -466,10 +473,7 @@ fn edge_cluster_id_fresh_generation() {
         );
         let contents = std::fs::read_to_string(&cluster_id_file).unwrap();
         let parsed = uuid::Uuid::parse_str(contents.trim()).unwrap();
-        assert_eq!(
-            parsed, disk.cluster_id.0,
-            "disk {i} cluster ID mismatch"
-        );
+        assert_eq!(parsed, disk.cluster_id.0, "disk {i} cluster ID mismatch");
     }
 
     // Storage should still work
@@ -579,7 +583,10 @@ fn edge_cluster_id_mismatch_rejected() {
     // Should fail with ClusterIdMismatch
     let result = ObjectStorage::new(config2);
     assert!(result.is_err());
-    let err = match result { Ok(_) => panic!("expected error"), Err(e) => e };
+    let err = match result {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
     assert!(
         err.to_string().contains("cluster ID") || err.to_string().contains("ClusterIdMismatch"),
         "expected ClusterIdMismatch error, got: {err}"
@@ -603,7 +610,10 @@ fn edge_cluster_id_count_mismatch_rejected() {
 
     let result = ObjectStorage::new(config_bad);
     assert!(result.is_err());
-    let err = match result { Ok(_) => panic!("expected error"), Err(e) => e };
+    let err = match result {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
     assert!(
         err.to_string().contains("disk_uuids count") || err.to_string().contains("total_shards"),
         "expected count mismatch error, got: {err}"

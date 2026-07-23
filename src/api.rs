@@ -1,13 +1,13 @@
 /// Main storage API: PUT, GET, DELETE, LIST, GarbageCollection.
 use std::collections::HashSet;
 
-use futures::AsyncReadExt;
 use futures::io::Cursor;
+use futures::AsyncReadExt;
 
+use crate::checksum::{self, StreamingChecksum};
 use crate::config::Config;
 use crate::disk::{ChunkStore, VersionMeta, VersionStatus};
 use crate::errors::{StorageError, StorageResult};
-use crate::checksum::{self, StreamingChecksum};
 
 const CHUNK_SIZE_DEFAULT: usize = 64 * 1024 * 1024;
 
@@ -46,7 +46,8 @@ impl ObjectStorage {
 
         // Step 2: Fetch version metadata.
         let meta = if version != 0 {
-            self.meta_store.read_version_by_number(object_key, version)?
+            self.meta_store
+                .read_version_by_number(object_key, version)?
         } else {
             self.meta_store.read_version(object_key)?
         };
@@ -72,11 +73,7 @@ impl ObjectStorage {
             let shard_results = self.chunk_store.read_all_shards(chunk_id);
 
             // Get the expected per-chunk checksum
-            let expected_chunk_cksum = meta
-                .chunk_checksums
-                .get(chunk_idx)
-                .copied()
-                .unwrap_or(0);
+            let expected_chunk_cksum = meta.chunk_checksums.get(chunk_idx).copied().unwrap_or(0);
 
             // Calculate expected (unpadded) chunk size for verification
             let is_last_chunk = chunk_idx == total_chunks - 1;
@@ -87,9 +84,12 @@ impl ObjectStorage {
             };
 
             // Decode this chunk from its shards (verifies chunk checksum)
-            let (chunk_data, corrections) = self
-                .chunk_store
-                .recover_chunk(chunk_id, expected_chunk_cksum, expected_chunk_size, &shard_results)?;
+            let (chunk_data, corrections) = self.chunk_store.recover_chunk(
+                chunk_id,
+                expected_chunk_cksum,
+                expected_chunk_size,
+                &shard_results,
+            )?;
 
             // Trim last chunk if needed (it may have padding from erasure coding)
             let actual_chunk_size = std::cmp::min(chunk_data.len(), expected_chunk_size);
@@ -98,15 +98,10 @@ impl ObjectStorage {
             // Write corrections for any failed/corrupted shards
             for (disk_idx, corrected_shard) in corrections {
                 let shard_cksum = checksum::checksum(&corrected_shard);
-                if let Err(e) = self.chunk_store.disks[disk_idx].write(
-                    chunk_id,
-                    &corrected_shard,
-                    shard_cksum,
-                ) {
-                    tracing::warn!(
-                        "Failed to write correction for chunk {}: {e}",
-                        chunk_id
-                    );
+                if let Err(e) =
+                    self.chunk_store.disks[disk_idx].write(chunk_id, &corrected_shard, shard_cksum)
+                {
+                    tracing::warn!("Failed to write correction for chunk {}: {e}", chunk_id);
                 }
             }
         }
@@ -163,8 +158,7 @@ impl ObjectStorage {
             let chunk_cksum = checksum::checksum(&chunk_data);
 
             let id = uuid::Uuid::new_v4().to_string();
-            let _disk_cksum =
-                self.chunk_store.write_chunk(&id, &chunk_data, 0)?;
+            let _disk_cksum = self.chunk_store.write_chunk(&id, &chunk_data, 0)?;
 
             obj_hasher.update(&chunk_data);
             data_size += n;
@@ -180,11 +174,16 @@ impl ObjectStorage {
 
         if chunk_ids.is_empty() {
             // Empty object: write pending metadata with no chunks, promote
-            let next_version = self
-                .meta_store
-                .incr_version_counter(object_key)?;
-            self.meta_store
-                .set_pending(object_key, next_version, &[], &[], object_checksum, 0, std::collections::HashMap::new())?;
+            let next_version = self.meta_store.incr_version_counter(object_key)?;
+            self.meta_store.set_pending(
+                object_key,
+                next_version,
+                &[],
+                &[],
+                object_checksum,
+                0,
+                std::collections::HashMap::new(),
+            )?;
             return self
                 .meta_store
                 .promote_version(object_key, next_version)
@@ -392,7 +391,8 @@ impl ObjectStorage {
         recovering_disk_idx: usize,
         source_disk_idx: usize,
     ) -> StorageResult<()> {
-        self.meta_store.recover_disk(recovering_disk_idx, source_disk_idx)
+        self.meta_store
+            .recover_disk(recovering_disk_idx, source_disk_idx)
     }
 
     /// Get the number of healthy metadata disks.
@@ -421,29 +421,20 @@ impl ObjectStorage {
     ) -> StorageResult<std::collections::HashMap<String, String>> {
         let meta = match self.meta_store.read_version(object_key) {
             Ok(m) => m,
-            Err(StorageError::NotFound(_)) => {
-                return Ok(std::collections::HashMap::new())
-            }
+            Err(StorageError::NotFound(_)) => return Ok(std::collections::HashMap::new()),
             Err(e) => return Err(e),
         };
         Ok(meta.metadata)
     }
 
     /// Get a single metadata value by key (case-insensitive).
-    pub fn get_metadata_value(
-        &self,
-        object_key: &str,
-        key: &str,
-    ) -> StorageResult<Option<String>> {
+    pub fn get_metadata_value(&self, object_key: &str, key: &str) -> StorageResult<Option<String>> {
         let meta = match self.meta_store.read_version(object_key) {
             Ok(m) => m,
             Err(StorageError::NotFound(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
-        Ok(meta
-            .metadata
-            .get(key.to_lowercase().as_str())
-            .cloned())
+        Ok(meta.metadata.get(key.to_lowercase().as_str()).cloned())
     }
 
     /// Set a single metadata key-value pair on the latest version of an object.
@@ -480,11 +471,7 @@ impl ObjectStorage {
     }
 
     /// Set the Content-Type of an object.
-    pub fn set_content_type(
-        &self,
-        object_key: &str,
-        content_type: &str,
-    ) -> StorageResult<()> {
+    pub fn set_content_type(&self, object_key: &str, content_type: &str) -> StorageResult<()> {
         self.set_metadata_value(object_key, "content-type", content_type)
     }
 
@@ -494,11 +481,9 @@ impl ObjectStorage {
     /// the parsed value, or `None` if no ACL is set.
     pub fn get_acl(&self, object_key: &str) -> StorageResult<Option<serde_json::Value>> {
         if let Some(acl_str) = self.get_metadata_value(object_key, "x-amz-acl")? {
-            Ok(Some(
-                serde_json::from_str(&acl_str).map_err(|e| {
-                    StorageError::KvError(format!("parse ACL: {e}"))
-                })?,
-            ))
+            Ok(Some(serde_json::from_str(&acl_str).map_err(|e| {
+                StorageError::KvError(format!("parse ACL: {e}"))
+            })?))
         } else {
             Ok(None)
         }
@@ -508,11 +493,7 @@ impl ObjectStorage {
     ///
     /// The ACL value is serialized as a JSON string and stored under the key
     /// `x-amz-acl`.
-    pub fn set_acl(
-        &self,
-        object_key: &str,
-        acl: &serde_json::Value,
-    ) -> StorageResult<()> {
+    pub fn set_acl(&self, object_key: &str, acl: &serde_json::Value) -> StorageResult<()> {
         let acl_json = serde_json::to_string(acl)
             .map_err(|e| StorageError::KvError(format!("serialize ACL: {e}")))?;
         self.set_metadata_value(object_key, "x-amz-acl", &acl_json)
@@ -524,11 +505,7 @@ impl ObjectStorage {
     }
 
     /// Set the Cache-Control header of an object.
-    pub fn set_cache_control(
-        &self,
-        object_key: &str,
-        cache_control: &str,
-    ) -> StorageResult<()> {
+    pub fn set_cache_control(&self, object_key: &str, cache_control: &str) -> StorageResult<()> {
         self.set_metadata_value(object_key, "cache-control", cache_control)
     }
 }

@@ -80,7 +80,9 @@ impl ReplicatedMetaStore {
             }
         }
 
-        Err(StorageError::NotFound("key not found on any healthy disk".to_string()))
+        Err(StorageError::NotFound(
+            "key not found on any healthy disk".to_string(),
+        ))
     }
 
     /// Read the latest committed version metadata for an object from any healthy disk.
@@ -103,9 +105,7 @@ impl ReplicatedMetaStore {
                 .get(&idx)
                 .unwrap()
                 .get(meta_key.as_bytes())
-                .map_err(|e| {
-                    StorageError::KvError(format!("read counter from disk {idx}: {e}"))
-                })?;
+                .map_err(|e| StorageError::KvError(format!("read counter from disk {idx}: {e}")))?;
 
             let hinted_version = match val {
                 Some(bytes) if bytes.len() >= 8 => {
@@ -165,9 +165,7 @@ impl ReplicatedMetaStore {
             .get(&disk_idx)
             .unwrap()
             .get(ver_key.as_bytes())
-            .map_err(|e| {
-                StorageError::KvError(format!("read version on disk {disk_idx}: {e}"))
-            })?;
+            .map_err(|e| StorageError::KvError(format!("read version on disk {disk_idx}: {e}")))?;
 
         let Some(value_bytes) = value else {
             return Err(StorageError::NotFound(format!(
@@ -201,11 +199,7 @@ impl ReplicatedMetaStore {
         Ok(buf)
     }
 
-    fn deserialize_meta(
-        &self,
-        bytes: &[u8],
-        object_key: &str,
-    ) -> StorageResult<VersionMeta> {
+    fn deserialize_meta(&self, bytes: &[u8], object_key: &str) -> StorageResult<VersionMeta> {
         if bytes.len() < 9 {
             return Err(StorageError::KvError("version metadata too short".into()));
         }
@@ -478,7 +472,11 @@ impl ReplicatedMetaStore {
         let ops = vec![
             (ver_key.clone(), self.serialize_meta(&meta)?),
             (format!("{ver_key}:chunks"), serialize_chunk_ids(chunk_ids)),
-            (format!("obj:meta:{object_key}"), version.to_le_bytes().to_vec())];
+            (
+                format!("obj:meta:{object_key}"),
+                version.to_le_bytes().to_vec(),
+            ),
+        ];
 
         self.write_batch(ops)
     }
@@ -505,7 +503,8 @@ impl ReplicatedMetaStore {
 
         let ops = vec![
             (ver_key, self.serialize_meta(&committed_meta)?),
-            (chunks_key, serialize_chunk_ids(&committed_meta.chunk_ids))];
+            (chunks_key, serialize_chunk_ids(&committed_meta.chunk_ids)),
+        ];
 
         self.write_batch(ops)
     }
@@ -535,8 +534,9 @@ impl ReplicatedMetaStore {
         let chunks_key = format!("{ver_key}:chunks");
 
         let ops = vec![
-            (ver_key, vec![0]),  // Mark for deletion
-            (chunks_key, vec![0])];
+            (ver_key, vec![0]), // Mark for deletion
+            (chunks_key, vec![0]),
+        ];
 
         self.write_batch(ops)
     }
@@ -551,13 +551,20 @@ impl ReplicatedMetaStore {
         let mut meta = self.deserialize_meta(&value, &ver_key)?;
         meta.status = VersionStatus::Deleted;
 
-        let ops = vec![(ver_key, self.serialize_meta(&meta)?), (chunks_key, serialize_chunk_ids(&meta.chunk_ids))];
+        let ops = vec![
+            (ver_key, self.serialize_meta(&meta)?),
+            (chunks_key, serialize_chunk_ids(&meta.chunk_ids)),
+        ];
 
         self.write_batch(ops)
     }
 
     /// Scan version entries with a prefix.
-    pub fn scan_versions(&self, prefix: &str, limit: usize) -> StorageResult<Vec<(String, VersionMeta)>> {
+    pub fn scan_versions(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<(String, VersionMeta)>> {
         let key_prefix = if prefix.is_empty() {
             "ver:".to_string()
         } else {
@@ -713,7 +720,11 @@ impl ReplicatedMetaStore {
 
                 if success {
                     repaired.push(idx);
-                    tracing::debug!("Repaired key {} on disk {}", String::from_utf8_lossy(key), idx);
+                    tracing::debug!(
+                        "Repaired key {} on disk {}",
+                        String::from_utf8_lossy(key),
+                        idx
+                    );
                 }
             }
         }
@@ -731,7 +742,11 @@ impl ReplicatedMetaStore {
     ///
     /// `recovering_disk_idx` must be in `dbs` but not currently active.
     /// `source_disk_idx` must be a healthy disk to read from.
-    pub fn recover_disk(&self, recovering_disk_idx: usize, source_disk_idx: usize) -> StorageResult<()> {
+    pub fn recover_disk(
+        &self,
+        recovering_disk_idx: usize,
+        source_disk_idx: usize,
+    ) -> StorageResult<()> {
         if recovering_disk_idx == source_disk_idx {
             return Err(StorageError::Transient(
                 "recovering disk cannot be the source disk".to_string(),
@@ -747,14 +762,12 @@ impl ReplicatedMetaStore {
         }
 
         // Get the recovering disk databases
-        let rec_ks = self
-            .ks
-            .get(&recovering_disk_idx)
-            .ok_or_else(|| StorageError::Transient(format!("disk {recovering_disk_idx} not found")))?;
-        let rec_db = self
-            .dbs
-            .get(&recovering_disk_idx)
-            .ok_or_else(|| StorageError::Transient(format!("disk {recovering_disk_idx} not found")))?;
+        let rec_ks = self.ks.get(&recovering_disk_idx).ok_or_else(|| {
+            StorageError::Transient(format!("disk {recovering_disk_idx} not found"))
+        })?;
+        let rec_db = self.dbs.get(&recovering_disk_idx).ok_or_else(|| {
+            StorageError::Transient(format!("disk {recovering_disk_idx} not found"))
+        })?;
 
         // Collect all entries from source
         let source_ks = self.ks.get(&source_disk_idx).unwrap();

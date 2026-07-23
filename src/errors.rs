@@ -44,7 +44,11 @@ pub enum StorageError {
     ReplicationFailed(String),
 
     #[error("cluster ID mismatch on disk {disk_index}: expected={expected}, actual={actual}")]
-    ClusterIdMismatch { disk_index: usize, expected: String, actual: String },
+    ClusterIdMismatch {
+        disk_index: usize,
+        expected: String,
+        actual: String,
+    },
 
     #[error("disk {disk_index} not in cluster: no cluster ID found")]
     DiskIdNotFound { disk_index: usize },

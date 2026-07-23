@@ -1,8 +1,8 @@
+use crate::checksum;
 /// Disk management and chunk storage operations.
 use crate::config::Config;
 use crate::erasure::ErasureCoder;
 use crate::errors::{StorageError, StorageResult};
-use crate::checksum;
 
 /// Status of a version in the KV store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,15 +104,9 @@ impl Disk {
         std::fs::write(&chunk_path, &file_data).map_err(|e| {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 *self.is_failed.lock().unwrap() = true;
-                StorageError::DiskFailed(format!(
-                    "write to {} failed: {e}",
-                    self.path.display()
-                ))
+                StorageError::DiskFailed(format!("write to {} failed: {e}", self.path.display()))
             } else {
-                StorageError::Transient(format!(
-                    "write to {} failed: {e}",
-                    self.path.display()
-                ))
+                StorageError::Transient(format!("write to {} failed: {e}", self.path.display()))
             }
         })
     }
@@ -136,10 +130,7 @@ impl Disk {
                     e
                 ))
             } else {
-                StorageError::Transient(format!(
-                    "read from {} failed: {e}",
-                    self.path.display()
-                ))
+                StorageError::Transient(format!("read from {} failed: {e}", self.path.display()))
             }
         })?;
 
@@ -215,8 +206,7 @@ impl ChunkStore {
             let disk_path = std::path::PathBuf::from(&config.disk_paths[i]);
 
             // Scan (or generate) the cluster ID for this disk
-            let cluster_id =
-                crate::cluster::scan_disk_cluster_id(&disk_path, expected, i)?;
+            let cluster_id = crate::cluster::scan_disk_cluster_id(&disk_path, expected, i)?;
 
             disks.push(Disk::new(disk_path, cluster_id));
         }
@@ -241,9 +231,9 @@ impl ChunkStore {
         let chunk_cksum = checksum::checksum(data);
         let k = self.coder.data_shards();
         let shard_size = data.len().div_ceil(k); // Round up
-        // Reed-Solomon requires even shard sizes
+                                                 // Reed-Solomon requires even shard sizes
         let shard_size = shard_size.div_ceil(2) * 2; // Round up to even
-        
+
         // Split data into K sub-shards of equal size (pad last one if needed)
         let mut data_shards: Vec<Vec<u8>> = Vec::with_capacity(k);
         for i in 0..k {
@@ -275,10 +265,7 @@ impl ChunkStore {
     }
 
     /// Read ALL N shards for a chunk, returning per-shard results.
-    pub fn read_all_shards(
-        &self,
-        chunk_id: &str,
-    ) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
+    pub fn read_all_shards(&self, chunk_id: &str) -> Vec<Result<Option<Vec<u8>>, StorageError>> {
         let mut results = Vec::with_capacity(self.num_disks);
 
         for disk in self.disks.iter() {
@@ -340,12 +327,11 @@ impl ChunkStore {
             .next()
             .ok_or(StorageError::TooManyFailures)?;
 
-        let mut decoder =
-            reed_solomon_simd::ReedSolomonDecoder::new(
-                self.coder.data_shards(),
-                self.coder.parity_shards(),
-                shard_size,
-            )?;
+        let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
+            self.coder.data_shards(),
+            self.coder.parity_shards(),
+            shard_size,
+        )?;
 
         for (i, (&p, shard)) in present.iter().zip(shards.iter()).enumerate() {
             if p && shard.is_some() {

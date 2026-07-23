@@ -436,36 +436,39 @@ enum FuzzOp {
 }
 
 fn any_op() -> impl Strategy<Value = FuzzOp> {
-    proptest::collection::vec(any::<u8>(), 0..50)
-        .prop_map(|bytes| {
-            let first = bytes.first().copied().unwrap_or(0);
-            let key_len = ((first % 4) as usize) + 2; // 2-5 chars
-            let key: String = (0..key_len)
-                .map(|i| bytes.get(i + 1).copied().unwrap_or(b'a') as char)
-                .collect();
+    proptest::collection::vec(any::<u8>(), 0..50).prop_map(|bytes| {
+        let first = bytes.first().copied().unwrap_or(0);
+        let key_len = ((first % 4) as usize) + 2; // 2-5 chars
+        let key: String = (0..key_len)
+            .map(|i| bytes.get(i + 1).copied().unwrap_or(b'a') as char)
+            .collect();
 
-            match first % 3 {
-                0 => {
-                    let data_start = 1 + key_len;
-                    let data = if data_start < bytes.len() {
-                        bytes[data_start..].to_vec()
-                    } else {
-                        vec![0]
-                    };
-                    FuzzOp::Put { key, data }
-                }
-                1 => {
-                    let token = if 1 + key_len < bytes.len() {
-                        let token_val = bytes[1 + key_len] as u64;
-                        if token_val > 0 { Some(token_val) } else { None }
+        match first % 3 {
+            0 => {
+                let data_start = 1 + key_len;
+                let data = if data_start < bytes.len() {
+                    bytes[data_start..].to_vec()
+                } else {
+                    vec![0]
+                };
+                FuzzOp::Put { key, data }
+            }
+            1 => {
+                let token = if 1 + key_len < bytes.len() {
+                    let token_val = bytes[1 + key_len] as u64;
+                    if token_val > 0 {
+                        Some(token_val)
                     } else {
                         None
-                    };
-                    FuzzOp::Get { key, token }
-                }
-                _ => FuzzOp::Delete { key },
+                    }
+                } else {
+                    None
+                };
+                FuzzOp::Get { key, token }
             }
-        })
+            _ => FuzzOp::Delete { key },
+        }
+    })
 }
 
 #[test]

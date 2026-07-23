@@ -23,11 +23,12 @@ impl ClusterId {
         let path = disk_path.join(CLUSTER_ID_FILENAME);
         match fs::read_to_string(&path) {
             Ok(contents) => {
-                let id = uuid::Uuid::parse_str(contents.trim())
-                    .map_err(|e| StorageError::Transient(format!(
+                let id = uuid::Uuid::parse_str(contents.trim()).map_err(|e| {
+                    StorageError::Transient(format!(
                         "invalid cluster ID on {}: {e}",
                         disk_path.display()
-                    )))?;
+                    ))
+                })?;
                 Ok(Some(Self(id)))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -41,15 +42,15 @@ impl ClusterId {
     /// Write this cluster ID to a disk directory.
     /// Creates the directory if it doesn't exist.
     pub fn write_to(&self, disk_path: &Path) -> StorageResult<()> {
-        fs::create_dir_all(disk_path).map_err(|e| {
-            StorageError::Transient(format!("failed to create disk dir: {e}"))
-        })?;
+        fs::create_dir_all(disk_path)
+            .map_err(|e| StorageError::Transient(format!("failed to create disk dir: {e}")))?;
         let path = disk_path.join(CLUSTER_ID_FILENAME);
-        fs::write(&path, format!("{}\n", self.0))
-            .map_err(|e| StorageError::Transient(format!(
+        fs::write(&path, format!("{}\n", self.0)).map_err(|e| {
+            StorageError::Transient(format!(
                 "failed to write cluster ID to {}: {e}",
                 disk_path.display()
-            )))
+            ))
+        })
     }
 
     /// Validate that the disk's cluster ID matches the expected one.

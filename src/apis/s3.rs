@@ -151,21 +151,15 @@ pub fn build_router(storage: Arc<ObjectStorage>) -> Router {
 /// Convert `StorageError` into an Axum-compatible HTTP response.
 fn storage_error_to_response(err: StorageError) -> (StatusCode, String) {
     match &err {
-        StorageError::NotFound(key) => {
-            (StatusCode::NOT_FOUND, format!("Not Found: {key}"))
-        }
-        StorageError::ChecksumMismatch { expected, actual } => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Checksum mismatch: expected {expected}, got {actual}"),
-            )
-        }
-        StorageError::VersionConflict => {
-            (
-                StatusCode::CONFLICT,
-                "Version conflict: concurrent write detected".to_string(),
-            )
-        }
+        StorageError::NotFound(key) => (StatusCode::NOT_FOUND, format!("Not Found: {key}")),
+        StorageError::ChecksumMismatch { expected, actual } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Checksum mismatch: expected {expected}, got {actual}"),
+        ),
+        StorageError::VersionConflict => (
+            StatusCode::CONFLICT,
+            "Version conflict: concurrent write detected".to_string(),
+        ),
         _ => {
             tracing::error!("Storage error: {err}");
             (
@@ -207,9 +201,7 @@ async fn create_bucket(
 /// GET / → ListBuckets
 ///
 /// List all buckets owned by this storage instance.
-async fn list_buckets(
-    State(_state): State<S3AppState>,
-) -> impl IntoResponse {
+async fn list_buckets(State(_state): State<S3AppState>) -> impl IntoResponse {
     // TODO: Scan meta_store for all buckets
     // TODO: Return ListBucketsResponse
     let response = ListBucketsResponse {
@@ -338,16 +330,13 @@ async fn list_objects(
         (contents, Vec::new())
     } else {
         // Group by common prefix using delimiter
-        let mut groups: std::collections::BTreeMap<String, ()> =
-            std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<String, ()> = std::collections::BTreeMap::new();
         let mut contents: Vec<ObjectEntry> = Vec::new();
 
         for (key, meta) in sorted {
             // The key includes the storage prefix, e.g. "bucket/prefix/file.txt"
             // The suffix is everything after the storage prefix, e.g. "file.txt" or "dir/file.txt"
-            let suffix = key
-                .strip_prefix(&storage_prefix)
-                .unwrap_or(&key);
+            let suffix = key.strip_prefix(&storage_prefix).unwrap_or(&key);
 
             if let Some(pos) = suffix.find(delimiter) {
                 // There's a delimiter in the suffix — this contributes to common prefixes
@@ -430,10 +419,7 @@ async fn put_object(
     let mut headers = HeaderMap::new();
     headers.insert("x-amz-version-id", token.to_string().parse().unwrap());
     headers.insert("etag", etag.parse().unwrap());
-    headers.insert(
-        "content-length",
-        body.len().to_string().parse().unwrap(),
-    );
+    headers.insert("content-length", body.len().to_string().parse().unwrap());
 
     let mut res = Response::new(axum::body::Body::from(body));
     *res.headers_mut() = headers;
@@ -630,12 +616,12 @@ async fn put_bucket_versioning(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ObjectStorage;
+    use crate::config::Config;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get;
     use axum::Router;
-    use crate::config::Config;
-    use crate::api::ObjectStorage;
     use tempfile::TempDir;
     use tower::util::ServiceExt;
 
@@ -722,7 +708,9 @@ mod tests {
 
         // First put the object
         let put_body = axum::body::Bytes::from(b"test data for retrieval".to_vec());
-        let put_response = app.clone().oneshot(
+        let put_response = app
+            .clone()
+            .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri("http://localhost/mybucket/retrieval.txt")
@@ -758,7 +746,10 @@ mod tests {
         let body_bytes = axum::body::to_bytes(get_response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(body_bytes, axum::body::Bytes::from(b"test data for retrieval".as_slice()));
+        assert_eq!(
+            body_bytes,
+            axum::body::Bytes::from(b"test data for retrieval".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -792,7 +783,9 @@ mod tests {
         // Create data larger than chunk size
         let data: Vec<u8> = (0..4096u16).map(|i| (i % 256) as u8).collect();
         let body = axum::body::Bytes::from(data.clone());
-        let response = app.clone().oneshot(
+        let response = app
+            .clone()
+            .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri("http://localhost/mybucket/large.bin")

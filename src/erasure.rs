@@ -1,7 +1,7 @@
-/// Erasure coder wrapper around reed-solomon-simd.
-use crate::errors::StorageResult;
 use crate::config::Config;
 use crate::errors::StorageError;
+/// Erasure coder wrapper around reed-solomon-simd.
+use crate::errors::StorageResult;
 
 /// Encodes K data shards into N total shards (K data + C parity).
 #[derive(Debug, Clone)]
@@ -34,7 +34,11 @@ impl ErasureCoder {
     /// Encode K data shards into N total shards (K data + C parity).
     /// Returns all N shards.
     pub fn encode(&self, data_shards: &[&[u8]]) -> StorageResult<Vec<Vec<u8>>> {
-        assert_eq!(data_shards.len(), self.k, "Must provide exactly K data shards");
+        assert_eq!(
+            data_shards.len(),
+            self.k,
+            "Must provide exactly K data shards"
+        );
         for shard in data_shards.iter() {
             assert!(!shard.is_empty(), "Shard data must not be empty");
         }
@@ -90,9 +94,7 @@ impl ErasureCoder {
             return Err(StorageError::TooManyFailures);
         }
 
-        let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(
-            self.k, self.c, shard_size,
-        )?;
+        let mut decoder = reed_solomon_simd::ReedSolomonDecoder::new(self.k, self.c, shard_size)?;
 
         for (i, (&p, shard)) in present.iter().zip(shards.iter()).enumerate() {
             if p && shard.is_some() {
