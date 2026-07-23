@@ -23,5 +23,6 @@ tower-http = { version = "0.5", features = ["trace"] }
 md-5 = "0.10"
 
 [dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt"]}
 tempfile = "3"
 proptest = "1"
