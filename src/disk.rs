@@ -74,7 +74,12 @@ impl Disk {
         }
     }
 
-    /// Write chunk data to this disk.
+    /// Returns the path to the shards directory for this disk.
+    pub fn shards_path(&self) -> std::path::PathBuf {
+        self.path.join("shards")
+    }
+
+    /// Write chunk data to this disk's shards directory.
     pub fn write(&self, chunk_id: &str, data: &[u8], cksum: u128) -> StorageResult<()> {
         if *self.is_failed.lock().unwrap() {
             return Err(StorageError::DiskFailed(format!(
@@ -83,11 +88,12 @@ impl Disk {
             )));
         }
 
-        std::fs::create_dir_all(&self.path).map_err(|e| {
-            StorageError::Transient(format!("failed to create disk directory: {e}"))
+        let shards_path = self.shards_path();
+        std::fs::create_dir_all(&shards_path).map_err(|e| {
+            StorageError::Transient(format!("failed to create shards directory: {e}"))
         })?;
 
-        let chunk_path = self.path.join(chunk_id);
+        let chunk_path = shards_path.join(chunk_id);
         // Write data + checksum (16 bytes) at the end
         let mut file_data = Vec::with_capacity(data.len() + 16);
         file_data.extend_from_slice(data);
@@ -109,7 +115,7 @@ impl Disk {
         })
     }
 
-    /// Read chunk data from this disk and verify the checksum.
+    /// Read chunk data from this disk's shards directory and verify the checksum.
     pub fn read(&self, chunk_id: &str) -> StorageResult<Vec<u8>> {
         if *self.is_failed.lock().unwrap() {
             return Err(StorageError::DiskFailed(format!(
@@ -118,7 +124,7 @@ impl Disk {
             )));
         }
 
-        let chunk_path = self.path.join(chunk_id);
+        let chunk_path = self.shards_path().join(chunk_id);
         let file_data = std::fs::read(&chunk_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 StorageError::Transient(format!(
@@ -158,9 +164,9 @@ impl Disk {
         Ok(data.to_vec())
     }
 
-    /// Delete a chunk file from this disk.
+    /// Delete a chunk file from this disk's shards directory.
     pub fn delete_chunk(&self, chunk_id: &str) -> StorageResult<()> {
-        let chunk_path = self.path.join(chunk_id);
+        let chunk_path = self.shards_path().join(chunk_id);
         let _ = std::fs::remove_file(&chunk_path);
         Ok(())
     }
@@ -178,7 +184,7 @@ impl ChunkStore {
         let num_disks = config.total_shards();
         let mut disks = Vec::with_capacity(num_disks);
 
-        let disk_base = std::path::Path::new(&config.disk_base);
+        let base = std::path::Path::new(&config.base_path);
 
         // Parse UUIDs from config (may be empty → generate fresh)
         let parsed_uuids: Vec<Option<crate::cluster::ClusterId>> = config
@@ -214,13 +220,13 @@ impl ChunkStore {
 
         for i in 0..num_disks {
             let expected = expected_uuids[i].clone();
-            let disk_path = disk_base.join(format!("disk_{i}"));
+            let disk_path = base.join(format!("disk_{i}"));
 
             // Scan (or generate) the cluster ID for this disk
             let cluster_id =
                 crate::cluster::scan_disk_cluster_id(&disk_path, &expected, i)?;
 
-            disks.push(Disk::new(disk_base, i, cluster_id));
+            disks.push(Disk::new(base, i, cluster_id));
         }
 
         Ok(Self {

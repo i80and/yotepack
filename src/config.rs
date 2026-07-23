@@ -1,10 +1,9 @@
 /// Configuration for the erasure-coded object storage system.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Base directory for all storage data (Fjall KV store per disk).
-    pub db_path: String,
-    /// Base directory for disk storage (chunk data files).
-    pub disk_base: String,
+    /// Base directory for all storage data.
+    /// Structure: {base}/disk_{i}/metadata/ for Fjall KV, {base}/disk_{i}/shards/ for data.
+    pub base_path: String,
     /// Number of tolerable disk failures (M) for data layer.
     /// Derives: K = M+1 data shards, C = M parity shards, N = 2M+1 total shards.
     pub disk_failures: u32,
@@ -21,8 +20,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            db_path: "./storage_db".to_string(),
-            disk_base: "./disks".to_string(),
+            base_path: "./storage".to_string(),
             disk_failures: 1,
             chunk_size: 64 * 1024 * 1024, // 64 MiB
             metadata_replicas: 0, // 0 = all disks

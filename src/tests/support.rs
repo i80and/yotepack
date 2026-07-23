@@ -22,8 +22,7 @@ pub fn test_dir(name: &str) -> TempDir {
 /// - disk_uuids: empty means "generate on startup"
 pub fn make_test_config(tmp: &TempDir, disk_failures: u32, chunk_size: usize, metadata_replicas: usize) -> Config {
     Config {
-        db_path: format!("{}/db", tmp.path().display()),
-        disk_base: format!("{}/disks", tmp.path().display()),
+        base_path: tmp.path().display().to_string(),
         disk_failures,
         chunk_size,
         metadata_replicas,

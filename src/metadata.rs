@@ -35,7 +35,7 @@ impl ReplicatedMetaStore {
         let mut ks = HashMap::with_capacity(n);
 
         for i in 0..n {
-            let disk_db_path = format!("{}/disk_{i}/meta_db", config.db_path);
+            let disk_db_path = format!("{}/disk_{i}/metadata", config.base_path);
             let db = Database::builder(&disk_db_path).open()?;
             let keyspace = db.keyspace("main", KeyspaceCreateOptions::default)?;
             dbs.insert(i, db);

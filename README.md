@@ -23,14 +23,13 @@ This creates the storage layout under `/mnt/data`:
 
 ```
 /mnt/data/
-  fjall_db/
-    disk_0/fjall_db/   ← metadata KV (replicated on every disk)
-    disk_1/fjall_db/
-    ...
-  disks/
-    disk_0/            ← erasure shards + .cluster_id
-    disk_1/
-    ...
+  disk_0/
+    metadata/    ← metadata KV (replicated on every disk)
+    shards/      ← erasure-coded data shards
+  disk_1/
+    metadata/
+    shards/
+  ...
 ```
 
 Each physical disk should ideally be on a separate drive. The `--failures` flag controls how many simultaneous disk failures to tolerate:

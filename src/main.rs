@@ -37,8 +37,7 @@ async fn main() {
     let base = cli.storage;
 
     let config = Config {
-        db_path: format!("{base}/fjall_db"),
-        disk_base: format!("{base}/disks"),
+        base_path: base,
         disk_failures: cli.failures,
         chunk_size: cli.chunk_size,
         metadata_replicas: 0, // 0 = all disks
@@ -90,8 +89,7 @@ mod tests {
 
     fn make_test_config(tmp: &TempDir) -> Config {
         Config {
-            db_path: format!("{}/db", tmp.path().display()),
-            disk_base: format!("{}/disks", tmp.path().display()),
+            base_path: tmp.path().display().to_string(),
             disk_failures: 1,
             chunk_size: 1024, // 1 KiB for fast tests
             metadata_replicas: 0, // 0 = all disks

@@ -19,11 +19,10 @@ Single-node object storage with:
 │  ┌─────────────────────┐  ┌──────────────────────┐  │
 │  │ ReplicatedMetaStore │  │  ChunkStore          │  │
 │  │                     │  │                      │  │
-│  │  Disk 0: meta_db    │  │  Disk 0: data +      │  │
-│  │  Disk 1: meta_db    │  │    erasure shard     │  │
+│  │  Disk 0: metadata/  │  │  Disk 0: shards/     │  │
+│  │  Disk 1: metadata/  │  │  Disk 1: shards/     │  │
 │  │  ...                │  │  ...                 │  │
-│  │  Disk N: meta_db    │  │  Disk N: data +      │  │
-│  │                     │  │    erasure shard     │  │
+│  │  Disk N: metadata/  │  │  Disk N: shards/     │  │
 │  └─────────────────────┘  └──────────────────────┘  │
 └──────────────────────────────────────────────────────┘
 ```
@@ -41,13 +40,28 @@ any missing shard via Reed-Solomon.
 ### 2.2 Disk Identity
 
 Each physical disk carries a UUID stored in `.cluster_id` within its
-data directory. On startup the system reads each disk's UUID and validates
+disk directory. On startup the system reads each disk's UUID and validates
 it against the ordered list in configuration. Mismatches are rejected
 immediately.
 
 Fresh clusters auto-generate UUIDs for all disks. Existing clusters
 revalidate on every restart, catching the case where disks from a
 different cluster are accidentally connected.
+
+### 2.3 Directory Layout
+
+```
+{base_path}/
+├── disk_0/
+│   ├── metadata/       # Fjall KV database
+│   └── shards/         # Erasure-coded data shards
+├── disk_1/
+│   ├── metadata/
+│   └── shards/
+└── ...
+```
+
+Each disk directory is self-contained with both metadata and data.
 
 ## 3. DATA LAYER
 
@@ -91,7 +105,7 @@ reconstructs them from surviving shards. Corrected shards are written back.
 ### 3.5 Disk Identity and Cluster Membership
 
 Each physical disk in the pool carries a UUID stored in a hidden
-`.cluster_id` file inside its data directory (`{disk_base}/disk_{i}/.cluster_id`).
+`.cluster_id` file inside its disk directory (`{base_path}/disk_{i}/.cluster_id`).
 The UUID is generated on first use (v4 random) and persists across restarts.
 
 **Startup validation:**
@@ -314,13 +328,25 @@ write, decrement on delete) is a possible optimization.
 
 ```rust
 struct Config {
-    db_path: String,           // Base dir: {db_path}/disk_{i}/meta_db/
-    disk_base: String,         // Data disk base: {disk_base}/disk_{i}/
+    base_path: String,         // Base dir: {base_path}/disk_{i}/metadata/ and shards/
     disk_failures: u32,        // M — tolerable disk failures
     chunk_size: usize,         // Per-chunk size (default 64 MiB)
     metadata_replicas: usize,  // Metadata replicas (0 = all disks)
     disk_uuids: Vec<String>,   // Disk cluster IDs, one per slot. Empty = generate.
 }
+```
+
+Directory layout:
+
+```
+{base_path}/
+├── disk_0/
+│   ├── metadata/       # Fjall KV database for metadata
+│   └── shards/         # Erasure-coded data shards
+├── disk_1/
+│   ├── metadata/
+│   └── shards/
+└── ...
 ```
 
 ## 11. CORRECTNESS PROPERTIES
