@@ -94,19 +94,14 @@ pub(crate) fn scan_disk_cluster_id(
         Some(actual) => {
             // Validate against config
             match expected {
-                Some(expected_id) => {
-                    if actual != *expected_id {
-                        return Err(StorageError::ClusterIdMismatch {
-                            disk_index,
-                            expected: expected_id.0.to_string(),
-                            actual: actual.0.to_string(),
-                        });
-                    }
+                Some(expected_id) if actual != *expected_id => {
+                    return Err(StorageError::ClusterIdMismatch {
+                        disk_index,
+                        expected: expected_id.0.to_string(),
+                        actual: actual.0.to_string(),
+                    });
                 }
-                None => {
-                    // Legacy: no expected ID in config, accept whatever's on disk.
-                    // If the disk is brand new and has no .cluster_id, we fall through.
-                }
+                _ => {}
             }
             Ok(actual)
         }

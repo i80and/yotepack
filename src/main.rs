@@ -80,7 +80,7 @@ async fn main() {
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     tokio::spawn(async move {
-        if let Err(_) = tokio::signal::ctrl_c().await {
+        if tokio::signal::ctrl_c().await.is_err() {
             let _ = tx.send(());
         }
     });

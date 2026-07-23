@@ -387,7 +387,7 @@ impl ReplicatedMetaStore {
                 batch.commit()
             })
             .join()
-            .unwrap_or_else(|_| Ok(()));
+            .unwrap_or(Ok(()));
         }
 
         // Remove successfully repaired disks from the failed set
@@ -475,16 +475,10 @@ impl ReplicatedMetaStore {
             metadata,
         };
 
-        let mut ops = Vec::new();
-        ops.push((ver_key.clone(), self.serialize_meta(&meta)?));
-        ops.push((
-            format!("{ver_key}:chunks"),
-            serialize_chunk_ids(chunk_ids),
-        ));
-        ops.push((
-            format!("obj:meta:{object_key}"),
-            version.to_le_bytes().to_vec(),
-        ));
+        let ops = vec![
+            (ver_key.clone(), self.serialize_meta(&meta)?),
+            (format!("{ver_key}:chunks"), serialize_chunk_ids(chunk_ids)),
+            (format!("obj:meta:{object_key}"), version.to_le_bytes().to_vec())];
 
         self.write_batch(ops)
     }
@@ -509,9 +503,9 @@ impl ReplicatedMetaStore {
         let mut committed_meta = meta;
         committed_meta.status = VersionStatus::Committed;
 
-        let mut ops = Vec::new();
-        ops.push((ver_key, self.serialize_meta(&committed_meta)?));
-        ops.push((chunks_key, serialize_chunk_ids(&committed_meta.chunk_ids)));
+        let ops = vec![
+            (ver_key, self.serialize_meta(&committed_meta)?),
+            (chunks_key, serialize_chunk_ids(&committed_meta.chunk_ids))];
 
         self.write_batch(ops)
     }
@@ -529,8 +523,7 @@ impl ReplicatedMetaStore {
 
         let new_version = value + 1;
 
-        let mut ops = Vec::new();
-        ops.push((meta_key, new_version.to_le_bytes().to_vec()));
+        let ops = vec![(meta_key, new_version.to_le_bytes().to_vec())];
 
         self.write_batch(ops)?;
         Ok(new_version)
@@ -541,9 +534,9 @@ impl ReplicatedMetaStore {
         let ver_key = format!("ver:{object_key}:{version}");
         let chunks_key = format!("{ver_key}:chunks");
 
-        let mut ops = Vec::new();
-        ops.push((ver_key, vec![0])); // Mark for deletion
-        ops.push((chunks_key, vec![0]));
+        let ops = vec![
+            (ver_key, vec![0]),  // Mark for deletion
+            (chunks_key, vec![0])];
 
         self.write_batch(ops)
     }
@@ -558,9 +551,7 @@ impl ReplicatedMetaStore {
         let mut meta = self.deserialize_meta(&value, &ver_key)?;
         meta.status = VersionStatus::Deleted;
 
-        let mut ops = Vec::new();
-        ops.push((ver_key, self.serialize_meta(&meta)?));
-        ops.push((chunks_key, serialize_chunk_ids(&meta.chunk_ids)));
+        let ops = vec![(ver_key, self.serialize_meta(&meta)?), (chunks_key, serialize_chunk_ids(&meta.chunk_ids))];
 
         self.write_batch(ops)
     }

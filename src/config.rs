@@ -52,7 +52,7 @@ impl Config {
                 self.total_shards()
             ));
         }
-        if self.disk_uuids.len() != 0
+        if !self.disk_uuids.is_empty()
             && self.disk_uuids.len() != self.total_shards()
         {
             return Err(format!(

@@ -106,8 +106,8 @@ impl ErasureCoder {
         let restored_map: std::collections::HashMap<usize, &[u8]> =
             result.restored_original_iter().collect();
 
-        for i in 0..self.n {
-            if let Some(ref data) = shards[i] {
+        for (i, shard) in shards.iter().enumerate().take(self.n) {
+            if let Some(ref data) = shard {
                 all_shards.push(data.clone());
             } else if let Some(restored) = restored_map.get(&i) {
                 all_shards.push(restored.to_vec());

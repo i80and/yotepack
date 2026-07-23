@@ -13,6 +13,9 @@ pub enum VersionStatus {
     Deleted = 0x02,
 }
 
+/// Reconstructed data plus a list of (shard_index, shard_data) for committed shards.
+type ReconstructResult = (Vec<u8>, Vec<(usize, Vec<u8>)>);
+
 impl VersionStatus {
     pub fn from_u8(value: u8) -> StorageResult<Self> {
         match value {
@@ -208,13 +211,12 @@ impl ChunkStore {
             .map(|i| parsed_uuids.get(i).cloned().flatten())
             .collect();
 
-        for i in 0..num_disks {
-            let expected = expected_uuids[i].clone();
+        for (i, expected) in expected_uuids.iter().enumerate().take(num_disks) {
             let disk_path = std::path::PathBuf::from(&config.disk_paths[i]);
 
             // Scan (or generate) the cluster ID for this disk
             let cluster_id =
-                crate::cluster::scan_disk_cluster_id(&disk_path, &expected, i)?;
+                crate::cluster::scan_disk_cluster_id(&disk_path, expected, i)?;
 
             disks.push(Disk::new(disk_path, cluster_id));
         }
@@ -311,7 +313,7 @@ impl ChunkStore {
         expected_chunk_checksum: u128,
         expected_chunk_size: usize,
         shard_results: &[Result<Option<Vec<u8>>, StorageError>],
-    ) -> StorageResult<(Vec<u8>, Vec<(usize, Vec<u8>)>)> {
+    ) -> StorageResult<ReconstructResult> {
         let mut present = vec![false; self.num_disks];
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; self.num_disks];
 
@@ -363,8 +365,8 @@ impl ChunkStore {
         let restored_map: std::collections::HashMap<usize, &[u8]> =
             result.restored_original_iter().collect();
 
-        for i in 0..self.num_disks {
-            if let Some(ref data) = shards[i] {
+        for (i, shard) in shards.iter().enumerate().take(self.num_disks) {
+            if let Some(ref data) = shard {
                 all_shards.push(data.clone());
             } else if let Some(restored) = restored_map.get(&i) {
                 all_shards.push(restored.to_vec());
@@ -375,8 +377,8 @@ impl ChunkStore {
 
         // Reconstruct data from data shards only
         let mut reconstructed_data = Vec::new();
-        for ds in 0..self.coder.data_shards() {
-            reconstructed_data.extend_from_slice(&all_shards[ds]);
+        for shard in all_shards.iter().take(self.coder.data_shards()) {
+            reconstructed_data.extend_from_slice(shard);
         }
 
         // Trim padding that erasure coding adds to the last data shard

@@ -1,26 +1,26 @@
-/// S3-compatible HTTP API server.
-///
-/// This module provides the HTTP server layer for an S3-compatible object storage API.
-/// It is built on top of `axum` and exposes the core `ObjectStorage` operations
-/// as S3-style REST endpoints.
-///
-/// # Planned Endpoints
-///
-/// | S3 Operation      | HTTP Method | Path Pattern       | Handler           |
-/// |-------------------|-------------|--------------------|-------------------|
-/// | PutBucket         | PUT         | `/` (with `?bucket`) | `create_bucket`   |
-/// | ListBuckets       | GET         | `/`               | `list_buckets`    |
-/// | PutObject         | PUT         | `/:bucket/:key`    | `put_object`      |
-/// | GetObject         | GET         | `/:bucket/:key`    | `get_object`      |
-/// | DeleteObject      | DELETE      | `/:bucket/:key`    | `delete_object`   |
-/// | HeadObject        | HEAD        | `/:bucket/:key`    | `head_object`     |
-/// | ListObjects       | GET         | `/:bucket`         | `list_objects`    |
-/// | GetBucketAcl      | GET         | `/:bucket`         | `get_bucket_acl`  |
-/// | PutBucketAcl      | PUT         | `/:bucket`         | `put_bucket_acl`  |
-/// | GetObjectAcl      | GET         | `/:bucket/:key`    | `get_object_acl`  |
-/// | PutObjectAcl      | PUT         | `/:bucket/:key`    | `put_object_acl`  |
-/// | GetBucketVersioning | GET       | `/:bucket`         | `get_bucket_versioning` |
-/// | PutBucketVersioning | PUT       | `/:bucket`         | `put_bucket_versioning` |
+//! S3-compatible HTTP API server.
+//!
+//! This module provides the HTTP server layer for an S3-compatible object storage API.
+//! It is built on top of `axum` and exposes the core `ObjectStorage` operations
+//! as S3-style REST endpoints.
+//!
+//! # Planned Endpoints
+//!
+//! | S3 Operation      | HTTP Method | Path Pattern       | Handler           |
+//! |-------------------|-------------|--------------------|-------------------|
+//! | PutBucket         | PUT         | `/` (with `?bucket`) | `create_bucket`   |
+//! | ListBuckets       | GET         | `/`               | `list_buckets`    |
+//! | PutObject         | PUT         | `/:bucket/:key`    | `put_object`      |
+//! | GetObject         | GET         | `/:bucket/:key`    | `get_object`      |
+//! | DeleteObject      | DELETE      | `/:bucket/:key`    | `delete_object`   |
+//! | HeadObject        | HEAD        | `/:bucket/:key`    | `head_object`     |
+//! | ListObjects       | GET         | `/:bucket`         | `list_objects`    |
+//! | GetBucketAcl      | GET         | `/:bucket`         | `get_bucket_acl`  |
+//! | PutBucketAcl      | PUT         | `/:bucket`         | `put_bucket_acl`  |
+//! | GetObjectAcl      | GET         | `/:bucket/:key`    | `get_object_acl`  |
+//! | PutObjectAcl      | PUT         | `/:bucket/:key`    | `put_object_acl`  |
+//! | GetBucketVersioning | GET       | `/:bucket`         | `get_bucket_versioning` |
+//! | PutBucketVersioning | PUT       | `/:bucket`         | `put_bucket_versioning` |
 
 use axum::{
     extract::{Path, Query, State},
@@ -34,6 +34,7 @@ use md5::{Digest, Md5};
 use std::sync::Arc;
 
 // Parse bucket and key from a full path like "/bucket/subdir/file.txt"
+#[allow(dead_code)]
 fn parse_bucket_key(full_path: &str) -> Option<(String, String)> {
     let path = full_path.strip_prefix('/').unwrap_or(full_path);
     let mut parts = path.splitn(2, '/');
@@ -191,7 +192,7 @@ fn error_to_response(err: StorageError) -> Response {
 ///
 /// Create a new bucket with the given name.
 async fn create_bucket(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     // bucket name extracted from path or header
 ) -> impl IntoResponse {
     // TODO: Extract bucket name from path/header
@@ -207,7 +208,7 @@ async fn create_bucket(
 ///
 /// List all buckets owned by this storage instance.
 async fn list_buckets(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
 ) -> impl IntoResponse {
     // TODO: Scan meta_store for all buckets
     // TODO: Return ListBucketsResponse
@@ -221,7 +222,7 @@ async fn list_buckets(
 ///
 /// Delete an empty bucket.
 async fn delete_bucket(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path(bucket): Path<String>,
 ) -> impl IntoResponse {
     // TODO: Check bucket is empty
@@ -522,7 +523,7 @@ async fn delete_object(
 ///
 /// Retrieve metadata about an object without downloading its body.
 async fn head_object(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
     // TODO: Validate bucket exists
@@ -539,11 +540,11 @@ async fn head_object(
 // =============================================================================
 
 /// GET /:bucket?acl → GetBucketAcl
+#[allow(dead_code)]
 async fn get_bucket_acl(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path(bucket): Path<String>,
 ) -> impl IntoResponse {
-    let _ = state;
     let _ = bucket;
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -552,11 +553,11 @@ async fn get_bucket_acl(
 }
 
 /// PUT /:bucket?acl → PutBucketAcl
+#[allow(dead_code)]
 async fn put_bucket_acl(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path(bucket): Path<String>,
 ) -> impl IntoResponse {
-    let _ = state;
     let _ = bucket;
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -565,11 +566,11 @@ async fn put_bucket_acl(
 }
 
 /// GET /:bucket/:key?acl → GetObjectAcl
+#[allow(dead_code)]
 async fn get_object_acl(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let _ = state;
     let _ = bucket;
     let _ = key;
     (
@@ -579,11 +580,11 @@ async fn get_object_acl(
 }
 
 /// PUT /:bucket/:key?acl → PutObjectAcl
+#[allow(dead_code)]
 async fn put_object_acl(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let _ = state;
     let _ = bucket;
     let _ = key;
     (
@@ -597,11 +598,11 @@ async fn put_object_acl(
 // =============================================================================
 
 /// GET /:bucket?versioning → GetBucketVersioning
+#[allow(dead_code)]
 async fn get_bucket_versioning(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path(bucket): Path<String>,
 ) -> impl IntoResponse {
-    let _ = state;
     let _ = bucket;
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -610,11 +611,11 @@ async fn get_bucket_versioning(
 }
 
 /// PUT /:bucket?versioning → PutBucketVersioning
+#[allow(dead_code)]
 async fn put_bucket_versioning(
-    State(state): State<S3AppState>,
+    State(_state): State<S3AppState>,
     Path(bucket): Path<String>,
 ) -> impl IntoResponse {
-    let _ = state;
     let _ = bucket;
     (
         StatusCode::NOT_IMPLEMENTED,
