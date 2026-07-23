@@ -16,23 +16,26 @@
 ### Start the server
 
 ```bash
-yotepack --storage /mnt/data --failures 1
+yotepack --disk /mnt/disk0 --disk /mnt/disk1 --disk /mnt/disk2 --failures 1
 ```
 
-This creates the storage layout under `/mnt/data`:
+Each path points to the root of a physical disk (or partition). Each disk contains:
 
 ```
-/mnt/data/
-  disk_0/
-    metadata/    ← metadata KV (replicated on every disk)
-    shards/      ← erasure-coded data shards
-  disk_1/
-    metadata/
-    shards/
-  ...
+/mnt/disk0/
+  metadata/    ← replicated metadata KV (one per disk, total = 2×failures+1)
+  shards/      ← erasure-coded data shards
+
+/mnt/disk1/
+  metadata/
+  shards/
+
+/mnt/disk2/
+  metadata/
+  shards/
 ```
 
-Each physical disk should ideally be on a separate drive. The `--failures` flag controls how many simultaneous disk failures to tolerate:
+Each physical disk should ideally be on a separate drive. Specify one `--disk` path per shard slot using the `--failures` flag to control the number of shards:
 
 | `--failures` | Disks needed | Space overhead |
 |---|---|---|
@@ -45,10 +48,10 @@ Each physical disk should ideally be on a separate drive. The `--failures` flag 
 ```bash
 yotepack --help
 
---storage <PATH>        Base directory (default: ./storage)
---failures <N>          Disk failures to tolerate (default: 1)
---chunk-size <BYTES>    Chunk size in bytes (default: 64MiB)
---port <PORT>           Listen port (default: 8080, reserved for future HTTP API)
+-d, --disk <PATH>...       Disk paths (one per shard, required). Total = failures×2+1
+-f, --failures <N>         Disk failures to tolerate (default: 1)
+    --chunk-size <BYTES>   Chunk size in bytes (default: 64MiB)
+-p, --port <PORT>          Listen port (default: 8080, reserved for future HTTP API)
 ```
 
 ## What it does
