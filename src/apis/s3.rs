@@ -152,6 +152,13 @@ pub fn build_router(storage: Arc<ObjectStorage>) -> Router {
 fn storage_error_to_response(err: StorageError) -> (StatusCode, String) {
     match &err {
         StorageError::NotFound(key) => (StatusCode::NOT_FOUND, format!("Not Found: {key}")),
+        StorageError::BucketAlreadyExists(name) => (
+            StatusCode::CONFLICT,
+            format!("Bucket already exists: {name}"),
+        ),
+        StorageError::BucketNotFound(name) => {
+            (StatusCode::NOT_FOUND, format!("Bucket not found: {name}"))
+        }
         StorageError::ChecksumMismatch { expected, actual } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Checksum mismatch: expected {expected}, got {actual}"),
@@ -182,47 +189,80 @@ fn error_to_response(err: StorageError) -> Response {
 // Bucket Handlers (stubs)
 // =============================================================================
 
-/// PUT / → CreateBucket
+/// PUT /:bucket → CreateBucket
 ///
 /// Create a new bucket with the given name.
-async fn create_bucket(
-    State(_state): State<S3AppState>,
-    // bucket name extracted from path or header
-) -> impl IntoResponse {
-    // TODO: Extract bucket name from path/header
-    // TODO: Validate bucket name
-    // TODO: Create bucket metadata in meta_store
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "CreateBucket not yet implemented",
-    )
+async fn create_bucket(State(state): State<S3AppState>, Path(bucket): Path<String>) -> Response {
+    // Validate bucket name
+    if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
+        return error_to_response(StorageError::BucketNotFound(format!(
+            "Invalid bucket name: {bucket}"
+        )));
+    }
+
+    match state.storage.create_bucket(&bucket) {
+        Ok(()) => {
+            let mut res = Response::new(axum::body::Body::empty());
+            *res.status_mut() = StatusCode::CREATED;
+            res
+        }
+        Err(StorageError::BucketAlreadyExists(_)) => {
+            (StatusCode::CONFLICT, "Bucket already exists").into_response()
+        }
+        Err(e) => error_to_response(e),
+    }
 }
 
 /// GET / → ListBuckets
 ///
 /// List all buckets owned by this storage instance.
-async fn list_buckets(State(_state): State<S3AppState>) -> impl IntoResponse {
-    // TODO: Scan meta_store for all buckets
-    // TODO: Return ListBucketsResponse
-    let response = ListBucketsResponse {
-        buckets: Vec::new(),
+async fn list_buckets(State(state): State<S3AppState>) -> impl IntoResponse {
+    let buckets = match state.storage.list_buckets() {
+        Ok(buckets) => buckets,
+        Err(e) => return error_to_response(e),
     };
-    (StatusCode::OK, Json(response))
+
+    let response = ListBucketsResponse {
+        buckets: buckets
+            .into_iter()
+            .map(|b| BucketInfo {
+                name: b.name,
+                creation_date: b.created_at,
+            })
+            .collect(),
+    };
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// DELETE /:bucket → DeleteBucket
 ///
-/// Delete an empty bucket.
-async fn delete_bucket(
-    State(_state): State<S3AppState>,
-    Path(bucket): Path<String>,
-) -> impl IntoResponse {
-    // TODO: Check bucket is empty
-    // TODO: Remove bucket metadata
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!("DeleteBucket '{bucket}' not yet implemented"),
-    )
+/// Delete an empty bucket. Returns 409 if the bucket is not empty.
+async fn delete_bucket(State(state): State<S3AppState>, Path(bucket): Path<String>) -> Response {
+    // Validate bucket name
+    if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
+        return error_to_response(StorageError::BucketNotFound(format!(
+            "Invalid bucket name: {bucket}"
+        )));
+    }
+
+    match state.storage.delete_bucket(&bucket) {
+        Ok(()) => {
+            let mut res = Response::new(axum::body::Body::empty());
+            *res.status_mut() = StatusCode::NO_CONTENT;
+            res
+        }
+        Err(StorageError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            format!("Bucket '{bucket}' not found"),
+        )
+            .into_response(),
+        Err(StorageError::Transient(msg)) if msg.contains("not empty") => (
+            StatusCode::CONFLICT,
+            format!("Bucket '{bucket}' is not empty"),
+        )
+            .into_response(),
+        Err(e) => error_to_response(e),
+    }
 }
 
 // =============================================================================
@@ -1019,5 +1059,394 @@ mod tests {
         assert_eq!(resp.name, "testbucket");
         assert_eq!(resp.contents.len(), 2);
         assert!(resp.contents.iter().all(|o| o.key.contains("alpha/")));
+    }
+
+    // =====================================================================
+    // Bucket tests
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_create_bucket() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create a bucket
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/newbucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_bucket_already_exists() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create the bucket first time
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Try to create it again
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_list_buckets_empty() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListBucketsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.buckets.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_buckets_with_multiple() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create several buckets
+        for name in &["alpha", "beta", "gamma"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("http://localhost/{name}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        // List all buckets
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListBucketsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.buckets.len(), 3);
+
+        // Verify they're sorted
+        assert_eq!(resp.buckets[0].name, "alpha");
+        assert_eq!(resp.buckets[1].name, "beta");
+        assert_eq!(resp.buckets[2].name, "gamma");
+
+        // Verify each bucket has a creation date
+        for bucket in &resp.buckets {
+            assert!(!bucket.creation_date.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_bucket_empty() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create and delete an empty bucket
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/empty-bucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("http://localhost/empty-bucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's gone
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListBucketsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.buckets.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_bucket_not_empty() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create bucket and add an object
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::Bytes::from(b"hello".to_vec());
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/mybucket/file.txt")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Try to delete — should fail because bucket is not empty
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("http://localhost/mybucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_delete_bucket_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("http://localhost/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_bucket_isolation() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create two buckets
+        for name in &["bucket-a", "bucket-b"] {
+            let _response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("http://localhost/{name}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Put same key in both buckets
+        let body = axum::body::Bytes::from(b"hello".to_vec());
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/bucket-a/same.txt")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::Bytes::from(b"world".to_vec());
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/bucket-b/same.txt")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Verify each bucket only sees its own objects
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/bucket-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListObjectsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.contents.len(), 1);
+        assert!(resp.contents[0].key.contains("bucket-a"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/bucket-b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListObjectsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.contents.len(), 1);
+        assert!(resp.contents[0].key.contains("bucket-b"));
+
+        // Verify correct data retrieval
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/bucket-a/same.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes, axum::body::Bytes::from(&b"hello"[..]));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/bucket-b/same.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body_bytes, axum::body::Bytes::from(&b"world"[..]));
     }
 }

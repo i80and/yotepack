@@ -1,6 +1,7 @@
 /// Main storage API: PUT, GET, DELETE, LIST, GarbageCollection.
 use std::collections::HashSet;
 
+use chrono::Utc;
 use futures::io::Cursor;
 use futures::AsyncReadExt;
 
@@ -507,6 +508,48 @@ impl ObjectStorage {
     /// Set the Cache-Control header of an object.
     pub fn set_cache_control(&self, object_key: &str, cache_control: &str) -> StorageResult<()> {
         self.set_metadata_value(object_key, "cache-control", cache_control)
+    }
+
+    // -------------------------------------------------------------------------
+    // Bucket operations
+    // -------------------------------------------------------------------------
+
+    /// Create a new bucket with the given name.
+    ///
+    /// Returns `BucketAlreadyExists` if a bucket with this name already exists.
+    pub fn create_bucket(&self, name: &str) -> StorageResult<()> {
+        let created_at = Utc::now().to_rfc3339();
+        self.meta_store.create_bucket(name, &created_at)
+    }
+
+    /// Read bucket metadata by name.
+    pub fn read_bucket(&self, name: &str) -> StorageResult<crate::disk::BucketMeta> {
+        self.meta_store.read_bucket(name)
+    }
+
+    /// Delete a bucket. The bucket must be empty (contain no objects).
+    ///
+    /// Returns `NotFound` if the bucket does not exist.
+    pub fn delete_bucket(&self, name: &str) -> StorageResult<()> {
+        // Verify the bucket exists
+        let _meta = self.read_bucket(name)?;
+
+        // Check if the bucket is empty by scanning for any objects
+        let prefix = format!("{name}/");
+        let entries = self.meta_store.scan_versions(&prefix, 1)?;
+        if !entries.is_empty() {
+            return Err(StorageError::Transient(format!(
+                "bucket '{name}' is not empty, cannot delete"
+            )));
+        }
+
+        // Delete the bucket metadata
+        self.meta_store.delete_bucket(name)
+    }
+
+    /// List all buckets in this storage instance.
+    pub fn list_buckets(&self) -> StorageResult<Vec<crate::disk::BucketMeta>> {
+        self.meta_store.scan_buckets()
     }
 }
 

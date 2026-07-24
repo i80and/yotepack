@@ -4,6 +4,12 @@ pub enum StorageError {
     #[error("object not found: {0}")]
     NotFound(String),
 
+    #[error("bucket already exists: {0}")]
+    BucketAlreadyExists(String),
+
+    #[error("bucket not found: {0}")]
+    BucketNotFound(String),
+
     #[error("version not found: key={key}, version={version}")]
     VersionNotFound { key: String, version: u64 },
 

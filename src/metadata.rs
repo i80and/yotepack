@@ -393,6 +393,88 @@ impl ReplicatedMetaStore {
         Ok(())
     }
 
+    /// Delete keys from all healthy disks in parallel.
+    ///
+    /// Similar to `write_batch` but removes keys instead of inserting.
+    pub fn delete_keys(&self, keys: Vec<String>) -> StorageResult<()> {
+        let healthy = self.healthy_indexes();
+        if healthy.is_empty() {
+            return Err(StorageError::NoHealthyDisks);
+        }
+
+        let mut results: HashMap<usize, StorageResult<()>> = HashMap::new();
+        for &idx in &healthy {
+            let ks = self.ks.get(&idx).unwrap().clone();
+            let db = self.dbs.get(&idx).unwrap().clone();
+            let keys = keys.clone();
+
+            results.insert(
+                idx,
+                std::thread::spawn(move || {
+                    let mut batch = db.batch();
+                    for key in &keys {
+                        batch.remove(&ks, key.as_bytes());
+                    }
+                    batch.commit()?;
+                    Ok(())
+                })
+                .join()
+                .unwrap_or_else(|e| {
+                    Err(StorageError::Transient(format!(
+                        "batch delete panicked: {e:?}"
+                    )))
+                }),
+            );
+        }
+
+        // Track which healthy disks failed
+        let mut healthy_failed = std::collections::HashSet::new();
+        for (idx, res) in &results {
+            if res.is_err() {
+                healthy_failed.insert(*idx);
+            }
+        }
+
+        // Mark failed disks
+        {
+            let mut failed = self.failed_disks.lock().unwrap();
+            for &idx in &healthy_failed {
+                failed.insert(idx);
+            }
+        }
+
+        // If ALL healthy disks failed, return error
+        let any_success = results.values().any(|r| r.is_ok());
+        if !any_success {
+            return Err(StorageError::NoHealthyDisks);
+        }
+
+        // Repair: delete from any disk that failed during the healthy delete
+        for &idx in &healthy_failed {
+            let ks = self.ks.get(&idx).unwrap().clone();
+            let db = self.dbs.get(&idx).unwrap().clone();
+            let keys = keys.clone();
+
+            let _ = std::thread::spawn(move || {
+                let mut batch = db.batch();
+                for key in &keys {
+                    batch.remove(&ks, key.as_bytes());
+                }
+                batch.commit()
+            })
+            .join()
+            .unwrap_or(Ok(()));
+        }
+
+        // Remove successfully repaired disks from the failed set
+        {
+            let mut failed = self.failed_disks.lock().unwrap();
+            failed.retain(|idx| !healthy_failed.contains(idx));
+        }
+
+        Ok(())
+    }
+
     /// Read a key from any healthy disk. Repairs failed disks if needed.
     ///
     /// Reads from the first healthy disk that has the key.
@@ -661,9 +743,75 @@ impl ReplicatedMetaStore {
 
     /// Delete a chunk metadata entry.
     pub fn delete_chunk_meta(&self, chunk_id: &str) -> StorageResult<()> {
-        let key = format!("chk:{chunk_id}");
-        let ops = vec![(key, vec![0])];
-        self.write_batch(ops)
+        self.delete_keys(vec![format!("chk:{chunk_id}")])
+    }
+
+    // -----------------------------------------------------------------------
+    // Bucket operations
+    // -----------------------------------------------------------------------
+
+    /// Check whether a bucket exists.
+    pub fn bucket_exists(&self, name: &str) -> StorageResult<bool> {
+        let key = format!("bkt:{name}");
+        self.read(key.as_bytes())
+            .map(|_| true)
+            .or_else(|e| match e {
+                StorageError::NotFound(_) => Ok(false),
+                other => Err(other),
+            })
+    }
+
+    /// Create a new bucket entry. Returns an error if the bucket already exists.
+    pub fn create_bucket(&self, name: &str, created_at: &str) -> StorageResult<()> {
+        if self.bucket_exists(name)? {
+            return Err(StorageError::BucketAlreadyExists(name.to_string()));
+        }
+        let key = format!("bkt:{name}");
+        let data = created_at.as_bytes().to_vec();
+        self.write_batch(vec![(key, data)])
+    }
+
+    /// Read bucket metadata by name.
+    pub fn read_bucket(&self, name: &str) -> StorageResult<crate::disk::BucketMeta> {
+        if !self.bucket_exists(name)? {
+            return Err(StorageError::NotFound(format!("bucket '{name}'")));
+        }
+        let key = format!("bkt:{name}");
+        let value = self.read(key.as_bytes())?;
+        let created_at = String::from_utf8_lossy(&value).to_string();
+        Ok(crate::disk::BucketMeta {
+            name: name.to_string(),
+            created_at,
+        })
+    }
+
+    /// Delete a bucket entry. Note: this only removes the bucket metadata marker.
+    /// The bucket must be empty (no objects) before calling this.
+    pub fn delete_bucket(&self, name: &str) -> StorageResult<()> {
+        let key = format!("bkt:{name}");
+        self.delete_keys(vec![key])
+    }
+
+    /// Scan all buckets and return their metadata.
+    pub fn scan_buckets(&self) -> StorageResult<Vec<crate::disk::BucketMeta>> {
+        let mut results = Vec::new();
+        let healthy = self.healthy_indexes();
+        if healthy.is_empty() {
+            return Err(StorageError::NoHealthyDisks);
+        }
+
+        let idx = healthy[0];
+        let ks = self.ks.get(&idx).unwrap();
+        for entry in ks.prefix(b"bkt:") {
+            let (key_bytes, value_bytes) = entry.into_inner()?;
+            let key = String::from_utf8_lossy(&key_bytes).to_string();
+            let name = key.strip_prefix("bkt:").unwrap_or(&key).to_string();
+            let created_at = String::from_utf8_lossy(&value_bytes).to_string();
+            results.push(crate::disk::BucketMeta { name, created_at });
+        }
+
+        results.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(results)
     }
 
     // -----------------------------------------------------------------------

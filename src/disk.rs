@@ -13,6 +13,13 @@ pub enum VersionStatus {
     Deleted = 0x02,
 }
 
+/// Metadata for a bucket stored in the replicated meta store.
+#[derive(Debug, Clone)]
+pub struct BucketMeta {
+    pub name: String,
+    pub created_at: String,
+}
+
 /// Reconstructed data plus a list of (shard_index, shard_data) for committed shards.
 type ReconstructResult = (Vec<u8>, Vec<(usize, Vec<u8>)>);
 
