@@ -7,6 +7,10 @@ use crate::config::Config;
 use crate::disk::{VersionMeta, VersionStatus};
 use crate::errors::{StorageError, StorageResult};
 
+/// Separator used between object_key and version in internal keys.
+/// Chosen as ASCII Unit Separator (\x1f) which cannot appear in object keys.
+const SEP: char = '\x1f';
+
 /// Replicated metadata store backed by one Fjall database per disk.
 ///
 /// On writes: commits to all healthy disks in parallel, then attempts
@@ -159,7 +163,7 @@ impl ReplicatedMetaStore {
         version: u64,
         disk_idx: usize,
     ) -> StorageResult<(u64, VersionMeta)> {
-        let ver_key = format!("ver:{object_key}:{version}");
+        let ver_key = format!("ver:{object_key}{SEP}{version}");
         let value = self
             .ks
             .get(&disk_idx)
@@ -234,14 +238,13 @@ impl ReplicatedMetaStore {
             Vec::new()
         };
 
-        let chunks_key = if object_key.contains(':') {
-            let parts: Vec<&str> = object_key.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                format!("ver:{}:{}:chunks", parts[1], parts[2])
-            } else {
-                format!("ver:{object_key}:{version_num}:chunks")
-            }
+        // Reconstruct the chunks key from the version metadata key.
+        // The key format is "ver:{object_key}<SEP>{version}", so the chunks key is
+        // "ver:{object_key}<SEP>{version}<SEP>chunks".
+        let chunks_key = if object_key.contains('\u{1f}') {
+            format!("{object_key}\u{1f}chunks")
         } else {
+            // Fallback (should not happen with the new format)
             format!("ver:{object_key}:{version_num}:chunks")
         };
 
@@ -540,7 +543,7 @@ impl ReplicatedMetaStore {
         data_size: usize,
         metadata: std::collections::HashMap<String, String>,
     ) -> StorageResult<()> {
-        let ver_key = format!("ver:{object_key}:{version}");
+        let ver_key = format!("ver:{object_key}{SEP}{version}");
         let meta = VersionMeta {
             version,
             chunk_ids: chunk_ids.to_vec(),
@@ -553,7 +556,7 @@ impl ReplicatedMetaStore {
 
         let ops = vec![
             (ver_key.clone(), self.serialize_meta(&meta)?),
-            (format!("{ver_key}:chunks"), serialize_chunk_ids(chunk_ids)),
+            (format!("{ver_key}{SEP}chunks"), serialize_chunk_ids(chunk_ids)),
             (
                 format!("obj:meta:{object_key}"),
                 version.to_le_bytes().to_vec(),
@@ -568,8 +571,8 @@ impl ReplicatedMetaStore {
     /// Returns ErrVersionConflict if the current value on any healthy disk
     /// doesn't match the expected pending state.
     pub fn promote_version(&self, object_key: &str, target_version: u64) -> StorageResult<()> {
-        let ver_key = format!("ver:{object_key}:{target_version}");
-        let chunks_key = format!("{ver_key}:chunks");
+        let ver_key = format!("ver:{object_key}{SEP}{target_version}");
+        let chunks_key = format!("{ver_key}{SEP}chunks");
 
         // Read the current value from any healthy disk to verify it's pending
         let value = self.read(ver_key.as_bytes())?;
@@ -612,8 +615,8 @@ impl ReplicatedMetaStore {
 
     /// Delete a pending version from all healthy disks.
     pub fn delete_pending(&self, object_key: &str, version: u64) -> StorageResult<()> {
-        let ver_key = format!("ver:{object_key}:{version}");
-        let chunks_key = format!("{ver_key}:chunks");
+        let ver_key = format!("ver:{object_key}{SEP}{version}");
+        let chunks_key = format!("{ver_key}{SEP}chunks");
 
         let ops = vec![
             (ver_key, vec![0]), // Mark for deletion
@@ -626,8 +629,8 @@ impl ReplicatedMetaStore {
     /// Mark the latest version as deleted.
     pub fn mark_deleted(&self, object_key: &str) -> StorageResult<()> {
         let latest_version = self.read_latest_version(object_key)?;
-        let ver_key = format!("ver:{object_key}:{latest_version}");
-        let chunks_key = format!("{ver_key}:chunks");
+        let ver_key = format!("ver:{object_key}{SEP}{latest_version}");
+        let chunks_key = format!("{ver_key}{SEP}chunks");
 
         let value = self.read(ver_key.as_bytes())?;
         let mut meta = self.deserialize_meta(&value, &ver_key)?;
@@ -677,8 +680,8 @@ impl ReplicatedMetaStore {
                 let (key_bytes, value_bytes) = guard.into_inner()?;
                 let key = String::from_utf8_lossy(&key_bytes).to_string();
 
-                // Skip chunk list entries
-                if key.ends_with(":chunks") {
+                // Skip chunk list entries (identified by the SEP+"chunks" suffix)
+                if key.ends_with("\u{1f}chunks") {
                     continue;
                 }
                 if !key.starts_with("ver:") {
@@ -718,7 +721,7 @@ impl ReplicatedMetaStore {
 
     /// Check if a key has a pending version.
     pub fn has_pending(&self, object_key: &str) -> StorageResult<bool> {
-        let key_prefix = format!("ver:{object_key}:");
+        let key_prefix = format!("ver:{object_key}{SEP}");
         let healthy = self.healthy_indexes();
         if healthy.is_empty() {
             return Ok(false);
@@ -729,7 +732,7 @@ impl ReplicatedMetaStore {
         for entry in ks.prefix(key_prefix.as_bytes()) {
             let (key_bytes, value_bytes) = entry.into_inner()?;
             let key = String::from_utf8_lossy(&key_bytes).to_string();
-            if key.ends_with(":chunks") {
+            if key.ends_with("\u{1f}chunks") {
                 continue;
             }
             if let Ok(meta) = self.deserialize_meta(&value_bytes, &key) {
@@ -824,7 +827,7 @@ impl ReplicatedMetaStore {
         object_key: &str,
         version: u64,
     ) -> StorageResult<(u64, VersionMeta)> {
-        let ver_key = format!("ver:{object_key}:{version}");
+        let ver_key = format!("ver:{object_key}{SEP}{version}");
         let healthy = self.healthy_indexes();
         if healthy.is_empty() {
             return Err(StorageError::NoHealthyDisks);

@@ -339,10 +339,10 @@ impl ObjectStorage {
 
         for (key, meta) in all_entries {
             if meta.status == VersionStatus::Pending {
-                // key format: ver:object_key:version
-                // Extract object_key by removing the trailing :version
-                let object_key = if let Some(colon) = key.rfind(':') {
-                    key[..colon].strip_prefix("ver:").unwrap_or(&key[4..])
+                // key format: ver:object_key<SEP>version
+                // Extract object_key by removing the trailing <SEP>version
+                let object_key = if let Some(sep) = key.rfind('\u{1f}') {
+                    key[..sep].strip_prefix("ver:").unwrap_or(&key[4..])
                 } else {
                     key.strip_prefix("ver:").unwrap_or(&key)
                 };
@@ -457,9 +457,9 @@ impl ObjectStorage {
             .insert(key.to_lowercase(), value.to_string());
 
         // Re-serialize and write back
-        let ver_key = format!("ver:{object_key}:{latest_version}");
+        let ver_key = format!("ver:{object_key}\u{1f}{latest_version}");
         let serialized = self.meta_store.serialize_meta(&new_meta)?;
-        let chunks_key = format!("{ver_key}:chunks");
+        let chunks_key = format!("{ver_key}\u{1f}chunks");
         self.meta_store.write_batch(vec![
             (ver_key, serialized),
             (chunks_key, serialize_chunk_ids(&new_meta.chunk_ids)),

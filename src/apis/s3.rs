@@ -1449,4 +1449,91 @@ mod tests {
             .unwrap();
         assert_eq!(body_bytes, axum::body::Bytes::from(&b"world"[..]));
     }
+
+    #[tokio::test]
+    async fn test_object_keys_with_colons() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_test_config(&tmp);
+        let storage = ObjectStorage::new(config).unwrap();
+        let app = build_router(Arc::new(storage));
+
+        // Create bucket
+        let _response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("http://localhost/colonbucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Put objects with colons in the key
+        let bodies = vec![
+            ("key:with:colons.txt", b"data1".as_slice()),
+            ("a:b/c:d.txt", b"data2".as_slice()),
+            ("time:12:34:56", b"data3".as_slice()),
+        ];
+
+        for (key, data) in &bodies {
+            let body = axum::body::Bytes::from(data.to_vec());
+            let _response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("http://localhost/colonbucket/{key}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        // Verify each object can be retrieved with correct content
+        for (key, expected_data) in &bodies {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("http://localhost/colonbucket/{key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK, "Failed to get {key}");
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                body_bytes,
+                axum::body::Bytes::from(expected_data.to_vec()),
+                "Mismatch for {key}"
+            );
+        }
+
+        // Verify listing works correctly
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("http://localhost/colonbucket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ListObjectsResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(resp.contents.len(), 3);
+    }
 }
