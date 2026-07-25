@@ -619,3 +619,35 @@ fn edge_cluster_id_count_mismatch_rejected() {
         "expected count mismatch error, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Invalid key validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn edge_empty_key_rejected() {
+    let tmp = support::test_dir("edge_empty_key");
+    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let storage = ObjectStorage::new(config).unwrap();
+
+    // PUT with empty key should fail
+    let result = rt().block_on(storage.put("", b"data"));
+    assert!(
+        result.is_err(),
+        "PUT with empty key should be rejected, got: {result:?}"
+    );
+
+    // GET with empty key should fail
+    let result = rt().block_on(storage.get("", None));
+    assert!(
+        result.is_err(),
+        "GET with empty key should be rejected, got: {result:?}"
+    );
+
+    // DELETE with empty key should fail
+    let result = storage.delete("");
+    assert!(
+        result.is_err(),
+        "DELETE with empty key should be rejected, got: {result:?}"
+    );
+}

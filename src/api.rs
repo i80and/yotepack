@@ -38,6 +38,12 @@ impl ObjectStorage {
         object_key: &str,
         read_after_write_token: Option<u64>,
     ) -> StorageResult<Vec<u8>> {
+        if object_key.is_empty() {
+            return Err(StorageError::NotFound(
+                "object key cannot be empty".to_string(),
+            ));
+        }
+
         // Step 1: Determine which version to read.
         let version = if let Some(token) = read_after_write_token {
             token
@@ -124,6 +130,12 @@ impl ObjectStorage {
     // -------------------------------------------------------------------------
 
     pub async fn put(&self, object_key: &str, data: &[u8]) -> StorageResult<u64> {
+        if object_key.is_empty() {
+            return Err(StorageError::NotFound(
+                "object key cannot be empty".to_string(),
+            ));
+        }
+
         let mut cursor = Cursor::new(data.to_vec());
         self.put_stream(object_key, &mut cursor).await
     }
@@ -227,6 +239,12 @@ impl ObjectStorage {
     // -------------------------------------------------------------------------
 
     pub fn delete(&self, object_key: &str) -> StorageResult<()> {
+        if object_key.is_empty() {
+            return Err(StorageError::NotFound(
+                "object key cannot be empty".to_string(),
+            ));
+        }
+
         match self.meta_store.read_latest_version(object_key) {
             Ok(_) => {}
             Err(StorageError::NotFound(_)) => {

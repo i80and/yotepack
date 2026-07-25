@@ -33,8 +33,8 @@ use chrono::Utc;
 use md5::{Digest, Md5};
 use quick_xml::events::Event;
 use quick_xml::writer::Writer;
-use std::sync::Arc;
 use std::io::Cursor;
+use std::sync::Arc;
 
 // S3 XML namespace
 const S3_NS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
@@ -85,7 +85,11 @@ pub struct S3AppState {
 fn xml_writer() -> Writer<Cursor<Vec<u8>>> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer
-        .write_event(Event::Decl(quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .write_event(Event::Decl(quick_xml::events::BytesDecl::new(
+            "1.0",
+            Some("UTF-8"),
+            None,
+        )))
         .unwrap();
     writer
 }
@@ -119,10 +123,14 @@ fn list_buckets_xml(buckets: &[BucketMeta]) -> String {
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Name")))
             .unwrap();
-        w.write_event(Event::Start(quick_xml::events::BytesStart::new("CreationDate")))
-            .unwrap();
-        w.write_event(Event::Text(quick_xml::events::BytesText::new(&b.created_at)))
-            .unwrap();
+        w.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "CreationDate",
+        )))
+        .unwrap();
+        w.write_event(Event::Text(quick_xml::events::BytesText::new(
+            &b.created_at,
+        )))
+        .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("CreationDate")))
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Bucket")))
@@ -130,8 +138,10 @@ fn list_buckets_xml(buckets: &[BucketMeta]) -> String {
     }
     w.write_event(Event::End(quick_xml::events::BytesEnd::new("Buckets")))
         .unwrap();
-    w.write_event(Event::End(quick_xml::events::BytesEnd::new("ListAllMyBucketsResult")))
-        .unwrap();
+    w.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        "ListAllMyBucketsResult",
+    )))
+    .unwrap();
     String::from_utf8(w.into_inner().into_inner()).unwrap()
 }
 
@@ -148,8 +158,7 @@ fn list_objects_xml(
 ) -> String {
     let mut w = xml_writer();
     w.write_event(Event::Start(
-        quick_xml::events::BytesStart::new("ListBucketResult")
-            .with_attributes([("xmlns", S3_NS)]),
+        quick_xml::events::BytesStart::new("ListBucketResult").with_attributes([("xmlns", S3_NS)]),
     ))
     .unwrap();
     w.write_event(Event::Start(quick_xml::events::BytesStart::new("Name")))
@@ -177,19 +186,27 @@ fn list_objects_xml(
     }
     w.write_event(Event::Start(quick_xml::events::BytesStart::new("MaxKeys")))
         .unwrap();
-    w.write_event(Event::Text(quick_xml::events::BytesText::new(&max_keys.to_string())))
-        .unwrap();
+    w.write_event(Event::Text(quick_xml::events::BytesText::new(
+        &max_keys.to_string(),
+    )))
+    .unwrap();
     w.write_event(Event::End(quick_xml::events::BytesEnd::new("MaxKeys")))
         .unwrap();
-    w.write_event(Event::Start(quick_xml::events::BytesStart::new("IsTruncated")))
-        .unwrap();
-    w.write_event(Event::Text(quick_xml::events::BytesText::new(&is_truncated.to_string())))
-        .unwrap();
+    w.write_event(Event::Start(quick_xml::events::BytesStart::new(
+        "IsTruncated",
+    )))
+    .unwrap();
+    w.write_event(Event::Text(quick_xml::events::BytesText::new(
+        &is_truncated.to_string(),
+    )))
+    .unwrap();
     w.write_event(Event::End(quick_xml::events::BytesEnd::new("IsTruncated")))
         .unwrap();
     if let Some(nm) = next_marker {
-        w.write_event(Event::Start(quick_xml::events::BytesStart::new("NextMarker")))
-            .unwrap();
+        w.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "NextMarker",
+        )))
+        .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new(nm)))
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("NextMarker")))
@@ -205,10 +222,14 @@ fn list_objects_xml(
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Key")))
             .unwrap();
-        w.write_event(Event::Start(quick_xml::events::BytesStart::new("LastModified")))
-            .unwrap();
-        w.write_event(Event::Text(quick_xml::events::BytesText::new(last_modified)))
-            .unwrap();
+        w.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "LastModified",
+        )))
+        .unwrap();
+        w.write_event(Event::Text(quick_xml::events::BytesText::new(
+            last_modified,
+        )))
+        .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("LastModified")))
             .unwrap();
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("ETag")))
@@ -219,12 +240,16 @@ fn list_objects_xml(
             .unwrap();
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Size")))
             .unwrap();
-        w.write_event(Event::Text(quick_xml::events::BytesText::new(&size.to_string())))
-            .unwrap();
+        w.write_event(Event::Text(quick_xml::events::BytesText::new(
+            &size.to_string(),
+        )))
+        .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Size")))
             .unwrap();
-        w.write_event(Event::Start(quick_xml::events::BytesStart::new("StorageClass")))
-            .unwrap();
+        w.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "StorageClass",
+        )))
+        .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new("STANDARD")))
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("StorageClass")))
@@ -234,30 +259,34 @@ fn list_objects_xml(
     }
 
     for cp in common_prefixes {
-        w.write_event(Event::Start(quick_xml::events::BytesStart::new("CommonPrefixes")))
-            .unwrap();
+        w.write_event(Event::Start(quick_xml::events::BytesStart::new(
+            "CommonPrefixes",
+        )))
+        .unwrap();
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Prefix")))
             .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new(cp)))
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Prefix")))
             .unwrap();
-        w.write_event(Event::End(quick_xml::events::BytesEnd::new("CommonPrefixes")))
-            .unwrap();
+        w.write_event(Event::End(quick_xml::events::BytesEnd::new(
+            "CommonPrefixes",
+        )))
+        .unwrap();
     }
 
-    w.write_event(Event::End(quick_xml::events::BytesEnd::new("ListBucketResult")))
-        .unwrap();
+    w.write_event(Event::End(quick_xml::events::BytesEnd::new(
+        "ListBucketResult",
+    )))
+    .unwrap();
     String::from_utf8(w.into_inner().into_inner()).unwrap()
 }
 
 /// S3 error XML response.
 fn s3_error_xml(code: &str, message: &str) -> String {
     let mut w = xml_writer();
-    w.write_event(Event::Start(
-        quick_xml::events::BytesStart::new("Error"),
-    ))
-    .unwrap();
+    w.write_event(Event::Start(quick_xml::events::BytesStart::new("Error")))
+        .unwrap();
     w.write_event(Event::Start(quick_xml::events::BytesStart::new("Code")))
         .unwrap();
     w.write_event(Event::Text(quick_xml::events::BytesText::new(code)))
@@ -445,7 +474,10 @@ async fn delete_bucket(State(state): State<S3AppState>, Path(bucket): Path<Strin
             res
         }
         Err(StorageError::NotFound(_)) => {
-            let body = s3_error_xml("NoSuchBucket", &format!("The specified bucket does not exist: {bucket}"));
+            let body = s3_error_xml(
+                "NoSuchBucket",
+                &format!("The specified bucket does not exist: {bucket}"),
+            );
             let mut headers = HeaderMap::new();
             headers.insert("content-type", "application/xml".parse().unwrap());
             let mut res = Response::new(axum::body::Body::from(body));
@@ -520,10 +552,14 @@ async fn list_objects(
         // Strip "ver:" prefix -> "bucket/key\x1fversion"
         let internal_key = raw_key.strip_prefix("ver:").unwrap_or(&raw_key).to_string();
         // Strip "\x1fversion" suffix -> "bucket/key"
-        let display_key = internal_key.split('\x1f').next().unwrap_or(&internal_key).to_string();
-        let existing = latest.entry(display_key.clone()).or_insert_with(|| {
-            (display_key, meta.clone())
-        });
+        let display_key = internal_key
+            .split('\x1f')
+            .next()
+            .unwrap_or(&internal_key)
+            .to_string();
+        let existing = latest
+            .entry(display_key.clone())
+            .or_insert_with(|| (display_key, meta.clone()));
         if meta.version > existing.1.version {
             existing.1 = meta;
         }
@@ -567,7 +603,10 @@ async fn list_objects(
                 .into_iter()
                 .map(|(key, meta)| {
                     // Strip bucket prefix from key: "bucket/key" -> "key"
-                    let display_key = key.strip_prefix(&format!("{bucket}/")).unwrap_or(&key).to_string();
+                    let display_key = key
+                        .strip_prefix(&format!("{bucket}/"))
+                        .unwrap_or(&key)
+                        .to_string();
                     (
                         display_key,
                         Utc::now().to_rfc3339(),
@@ -585,7 +624,10 @@ async fn list_objects(
 
             for (key, meta) in sorted {
                 // key is "bucket/key", compute relative display key
-                let display_key = key.strip_prefix(&format!("{bucket}/")).unwrap_or(&key).to_string();
+                let display_key = key
+                    .strip_prefix(&format!("{bucket}/"))
+                    .unwrap_or(&key)
+                    .to_string();
                 // The suffix is everything after the user-provided prefix
                 let suffix = display_key.strip_prefix(prefix).unwrap_or(&display_key);
 
@@ -642,13 +684,6 @@ async fn put_object(
         )));
     }
 
-    // Validate key
-    if key.is_empty() {
-        return error_to_response(StorageError::NotFound(
-            "Object key cannot be empty".to_string(),
-        ));
-    }
-
     // Extract body manually
     let body = axum::body::to_bytes(req.into_body(), usize::MAX)
         .await
@@ -692,13 +727,6 @@ async fn get_object(
         )));
     }
 
-    // Validate key
-    if key.is_empty() {
-        return error_to_response(StorageError::NotFound(
-            "Object key cannot be empty".to_string(),
-        ));
-    }
-
     // Build full object key
     let object_key = format!("{bucket}/{key}");
 
@@ -718,7 +746,11 @@ async fn get_object(
     headers.insert("etag", etag.parse().unwrap());
     headers.insert(
         "last-modified",
-        Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string().parse().unwrap(),
+        Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
     );
 
     let mut res = Response::new(axum::body::Body::from(data));
@@ -738,13 +770,6 @@ async fn delete_object(
         return error_to_response(StorageError::NotFound(format!(
             "Invalid bucket name: {bucket}"
         )));
-    }
-
-    // Validate key
-    if key.is_empty() {
-        return error_to_response(StorageError::NotFound(
-            "Object key cannot be empty".to_string(),
-        ));
     }
 
     // Build full object key
@@ -775,13 +800,6 @@ async fn head_object(
         )));
     }
 
-    // Validate key
-    if key.is_empty() {
-        return error_to_response(StorageError::NotFound(
-            "Object key cannot be empty".to_string(),
-        ));
-    }
-
     // Build full object key
     let object_key = format!("{bucket}/{key}");
 
@@ -801,7 +819,11 @@ async fn head_object(
     headers.insert("etag", etag.parse().unwrap());
     headers.insert(
         "last-modified",
-        Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string().parse().unwrap(),
+        Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
     );
 
     // HEAD returns headers but no body
@@ -912,10 +934,10 @@ mod tests {
     use axum::http::Request;
     use axum::routing::get;
     use axum::Router;
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
     use tempfile::TempDir;
     use tower::util::ServiceExt;
-    use quick_xml::Reader;
-    use quick_xml::events::Event;
 
     /// Parse an XML string and return a vec of (tag, text) pairs.
     fn xml_tags(xml: &str) -> Vec<(String, String)> {
@@ -950,13 +972,9 @@ mod tests {
 
     /// Get the text content of a tag in the XML.
     fn xml_tag(xml: &str, tag: &str) -> Option<String> {
-        xml_tags(xml).into_iter().find_map(|(t, v)| {
-            if t == tag {
-                Some(v)
-            } else {
-                None
-            }
-        })
+        xml_tags(xml)
+            .into_iter()
+            .find_map(|(t, v)| if t == tag { Some(v) } else { None })
     }
 
     /// Count how many times a tag appears in the XML.
@@ -1376,7 +1394,11 @@ mod tests {
         assert!(xml.contains("<Name>testbucket</Name>"));
         assert_eq!(xml_count(&xml, "Key"), 2);
         // Verify all keys contain alpha/
-        let keys = xml_tags(&xml).into_iter().filter(|(t, _)| *t == "Key").map(|(_, v)| v).collect::<Vec<_>>();
+        let keys = xml_tags(&xml)
+            .into_iter()
+            .filter(|(t, _)| *t == "Key")
+            .map(|(_, v)| v)
+            .collect::<Vec<_>>();
         assert!(keys.iter().all(|k| k.contains("alpha/")));
     }
 

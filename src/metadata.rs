@@ -556,7 +556,10 @@ impl ReplicatedMetaStore {
 
         let ops = vec![
             (ver_key.clone(), self.serialize_meta(&meta)?),
-            (format!("{ver_key}{SEP}chunks"), serialize_chunk_ids(chunk_ids)),
+            (
+                format!("{ver_key}{SEP}chunks"),
+                serialize_chunk_ids(chunk_ids),
+            ),
             (
                 format!("obj:meta:{object_key}"),
                 version.to_le_bytes().to_vec(),
