@@ -535,8 +535,8 @@ impl ObjectStorage {
         let _meta = self.read_bucket(name)?;
 
         // Check if the bucket is empty by scanning for any objects
-        let prefix = format!("{name}/");
-        let entries = self.meta_store.scan_versions(&prefix, 1)?;
+        // scan_versions() prepends "ver:", so we pass "{name}/" which becomes "ver:{name}/"
+        let entries = self.meta_store.scan_versions(name, 1)?;
         if !entries.is_empty() {
             return Err(StorageError::Transient(format!(
                 "bucket '{name}' is not empty, cannot delete"

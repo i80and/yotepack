@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use clap::Parser;
-use erasure_s3_storage::{Config, ObjectStorage};
+use erasure_s3_storage::{apis::s3::build_router, config::Config, ObjectStorage};
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -77,21 +78,28 @@ async fn main() {
         tracing::warn!("Startup recovery had warnings: {e}");
     }
 
-    // For now, just keep the server running
-    // TODO: Add HTTP/gRPC server for S3-compatible API
-    tracing::info!("Server started, listening on port {}", cli.port);
+    // Build and start the S3-compatible HTTP server
+    let storage = Arc::new(storage);
+    let app = build_router(storage);
 
-    // Signal handler for graceful shutdown
-    let (tx, rx) = tokio::sync::oneshot::channel();
-
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_err() {
-            let _ = tx.send(());
+    tracing::info!("Starting HTTP server on 0.0.0.0:{}", cli.port);
+    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to port {}: {e}", cli.port);
+            std::process::exit(1);
         }
-    });
+    };
 
-    let _ = rx.await;
-    tracing::info!("Shutting down...");
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await
+    {
+        tracing::error!("Server error: {e}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
