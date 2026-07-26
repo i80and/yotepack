@@ -66,33 +66,32 @@ impl ObjectStorage {
             });
         }
 
-        if meta.chunk_ids.is_empty() {
+        if meta.chunk_ids.is_empty() && meta.chunk_checksums.is_empty() {
             return Ok(Vec::new());
         }
 
         let expected_cksum = meta.checksum;
-        let total_chunks = meta.chunk_ids.len();
+        let total_chunks = meta.chunk_checksums.len();
         let data_size = meta.data_size;
+        let chunk_size = self.config.chunk_size as u32;
         let mut all_data: Vec<u8> = Vec::with_capacity(data_size);
 
-        // Step 3-4: Read and decode each chunk, detecting bitrot
-        for (chunk_idx, chunk_id) in meta.chunk_ids.iter().enumerate() {
-            let shard_results = self.chunk_store.read_all_shards(chunk_id);
-
-            // Get the expected per-chunk checksum
-            let expected_chunk_cksum = meta.chunk_checksums.get(chunk_idx).copied().unwrap_or(0);
-
-            // Calculate expected (unpadded) chunk size for verification
-            let is_last_chunk = chunk_idx == total_chunks - 1;
-            let expected_chunk_size = if is_last_chunk {
+        // Step 3-4: Read and decode each chunk from mega-files
+        for (chunk_idx, &expected_chunk_cksum) in meta.chunk_checksums.iter().enumerate() {
+            // Calculate expected (unpadded) chunk size
+            let expected_chunk_size = if chunk_idx == total_chunks - 1 {
                 data_size - (chunk_idx * self.config.chunk_size)
             } else {
                 self.config.chunk_size
             };
 
+            // Read all N shards for this chunk from mega-files
+            let shard_results = self
+                .chunk_store
+                .read_chunk(object_key, chunk_idx, chunk_size, version);
+
             // Decode this chunk from its shards (verifies chunk checksum)
             let (chunk_data, corrections) = self.chunk_store.recover_chunk(
-                chunk_id,
                 expected_chunk_cksum,
                 expected_chunk_size,
                 &shard_results,
@@ -104,11 +103,16 @@ impl ObjectStorage {
 
             // Write corrections for any failed/corrupted shards
             for (disk_idx, corrected_shard) in corrections {
-                let shard_cksum = checksum::checksum(&corrected_shard);
-                if let Err(e) =
-                    self.chunk_store.disks[disk_idx].write(chunk_id, &corrected_shard, shard_cksum)
-                {
-                    tracing::warn!("Failed to write correction for chunk {}: {e}", chunk_id);
+                // Use chunk_ids[chunk_idx] for legacy file naming
+                if let Some(chunk_id) = meta.chunk_ids.get(chunk_idx) {
+                    let shard_cksum = checksum::checksum(&corrected_shard);
+                    if let Err(e) = self.chunk_store.disks[disk_idx].write_legacy(
+                        chunk_id,
+                        &corrected_shard,
+                        shard_cksum,
+                    ) {
+                        tracing::warn!("Failed to write correction for chunk {}: {e}", chunk_id);
+                    }
                 }
             }
         }
@@ -153,14 +157,14 @@ impl ObjectStorage {
         object_key: &str,
         reader: &mut R,
     ) -> StorageResult<u64> {
-        let chunk_size = self.config.chunk_size;
-        let mut buf = vec![0u8; chunk_size];
-        let mut chunk_ids: Vec<String> = Vec::new();
+        let chunk_size = self.config.chunk_size as u32;
+        let mut buf = vec![0u8; self.config.chunk_size];
+        let mut chunk_data_list: Vec<Vec<u8>> = Vec::new();
         let mut chunk_checksums: Vec<u128> = Vec::new();
         let mut obj_hasher = StreamingChecksum::new();
         let mut data_size: usize = 0;
 
-        // Phase 1: Stream chunks from reader, write each chunk's shards
+        // Phase 1: Stream chunks from reader, compute checksums
         loop {
             let n = reader.read(&mut buf[..]).await?;
             if n == 0 {
@@ -170,23 +174,17 @@ impl ObjectStorage {
             let chunk_data = buf[..n].to_vec();
             let chunk_cksum = checksum::checksum(&chunk_data);
 
-            let id = uuid::Uuid::new_v4().to_string();
-            let _disk_cksum = self.chunk_store.write_chunk(&id, &chunk_data, 0)?;
-
             obj_hasher.update(&chunk_data);
             data_size += n;
-            chunk_ids.push(id);
+            chunk_data_list.push(chunk_data);
             chunk_checksums.push(chunk_cksum);
-
-            // Restore buffer for next iteration
-            buf = vec![0u8; chunk_size];
         }
 
         // Phase 2: Compute final object-level checksum
         let object_checksum = obj_hasher.finalize();
 
-        if chunk_ids.is_empty() {
-            // Empty object: write pending metadata with no chunks, promote
+        if chunk_data_list.is_empty() {
+            // Empty object
             let next_version = self.meta_store.incr_version_counter(object_key)?;
             self.meta_store.set_pending(
                 object_key,
@@ -203,25 +201,45 @@ impl ObjectStorage {
                 .map(|_| next_version);
         }
 
-        // Phase 3: Check for in-progress write, then set pending
+        // Phase 3: Determine version (check for pending, then set)
         let next_version = if self.meta_store.has_pending(object_key)? {
             self.meta_store.read_latest_version(object_key)?
         } else {
             self.meta_store.incr_version_counter(object_key)?
         };
 
-        // Set pending in KV store (replicated, with repair-on-write).
+        // Phase 4: Open mega-files and append all encoded chunks
+        let mut handles: Vec<Option<crate::disk::WriteHandle>> = self
+            .chunk_store
+            .disks
+            .iter()
+            .map(|d| d.open_write(object_key, next_version, chunk_size).map(Some))
+            .collect::<Result<_, _>>()?;
+
+        for chunk_data in chunk_data_list {
+            let (_, _) =
+                self.chunk_store
+                    .encode_and_append(&chunk_data, chunk_size, &mut handles)?;
+        }
+
+        // Phase 5: Commit all mega-files (atomic rename)
+        for handle in handles {
+            let handle = handle.expect("handle should be Some");
+            handle.commit_write()?;
+        }
+
+        // Phase 6: Set pending + promote in metadata
         self.meta_store.set_pending(
             object_key,
             next_version,
-            &chunk_ids,
+            &Vec::new(), // chunk_ids - no longer using chunk IDs
             &chunk_checksums,
             object_checksum,
             data_size,
             std::collections::HashMap::new(),
         )?;
 
-        // Phase 4: Promote from pending → committed
+        // Phase 7: Promote from pending → committed
         match self.meta_store.promote_version(object_key, next_version) {
             Ok(()) => {}
             Err(StorageError::VersionConflict) => {
@@ -268,7 +286,8 @@ impl ObjectStorage {
     ) -> StorageResult<Vec<ListEntry>> {
         let entries = self.meta_store.scan_versions(prefix, limit * 2)?;
 
-        let mut latest: std::collections::HashMap<String, VersionMeta> =
+        // Collect latest committed version per object, keeping the key
+        let mut latest: std::collections::HashMap<String, (VersionMeta, String)> =
             std::collections::HashMap::new();
 
         for (_key, meta) in entries {
@@ -276,41 +295,29 @@ impl ObjectStorage {
                 continue;
             }
             let object_key = _key.strip_prefix("ver:").unwrap_or(&_key).to_string();
-            let existing = latest.entry(object_key).or_insert(meta.clone());
-            if meta.version > existing.version {
-                *existing = meta;
+            let existing = latest
+                .entry(object_key.clone())
+                .or_insert((meta.clone(), object_key));
+            if meta.version > existing.0.version {
+                existing.0 = meta;
             }
         }
 
         let mut results: Vec<_> = latest.into_values().collect();
-        results.sort_by_key(|m| m.chunk_ids.first().cloned().unwrap_or_default());
+        results.sort_by(|a, b| a.1.cmp(&b.1));
 
         if let Some(m) = marker {
-            results.retain(|e| {
-                e.chunk_ids
-                    .first()
-                    .map(|cid| cid.as_str() > m)
-                    .unwrap_or(false)
-            });
+            results.retain(|e| e.1.as_str() > m);
         }
 
         results.truncate(limit);
 
         let mut output = Vec::with_capacity(results.len());
-        for meta in &results {
-            let size = if meta.chunk_ids.is_empty() {
-                0
-            } else {
-                let cs = if self.config.chunk_size > 0 {
-                    self.config.chunk_size
-                } else {
-                    CHUNK_SIZE_DEFAULT
-                };
-                meta.chunk_ids.len() * cs
-            };
+        for (meta, object_key) in &results {
+            let size = meta.data_size;
 
             output.push(ListEntry {
-                key: meta.chunk_ids.first().cloned().unwrap_or_default(),
+                key: object_key.clone(),
                 version: meta.version,
                 size,
                 checksum: meta.checksum,
@@ -325,23 +332,65 @@ impl ObjectStorage {
     // -------------------------------------------------------------------------
 
     pub fn garbage_collect(&self) -> StorageResult<()> {
-        let mut referenced: HashSet<String> = HashSet::new();
+        // Collect all referenced chunks from committed versions
+        let mut referenced: HashSet<u64> = HashSet::new();
 
         let all_entries = self.meta_store.scan_versions("", usize::MAX)?;
         for (_key, meta) in all_entries {
             if meta.status == VersionStatus::Committed {
-                for cid in &meta.chunk_ids {
-                    referenced.insert(cid.clone());
+                referenced.insert(meta.version);
+            }
+        }
+
+        // Check segments/ directories for orphaned versions
+        for disk in &self.chunk_store.disks {
+            let segments_parent = disk.path.join("segments");
+            if segments_parent.exists() {
+                // Iterate over object-key subdirectories
+                for entry in std::fs::read_dir(&segments_parent).map_err(|e| {
+                    StorageError::Transient(format!("failed to read segments dir: {e}"))
+                })? {
+                    let entry = entry.map_err(|e| {
+                        StorageError::Transient(format!("failed to read segment entry: {e}"))
+                    })?;
+                    let obj_dir = entry.path();
+                    if !obj_dir.is_dir() {
+                        continue;
+                    }
+                    // Check version files within this object directory
+                    for ver_entry in std::fs::read_dir(&obj_dir).map_err(|e| {
+                        StorageError::Transient(format!("failed to read object dir: {e}"))
+                    })? {
+                        let ver_entry = ver_entry.map_err(|e| {
+                            StorageError::Transient(format!("failed to read version entry: {e}"))
+                        })?;
+                        let filename = ver_entry.file_name();
+                        let filename_str = filename.to_string_lossy();
+                        if let Some(version_str) = filename_str.strip_prefix("v") {
+                            if let Ok(version) = version_str.parse::<u64>() {
+                                if !referenced.contains(&version) {
+                                    // Orphaned segment file
+                                    let _ = std::fs::remove_file(ver_entry.path());
+                                    tracing::debug!("GC: removed orphaned segment v{version}");
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        let all_chunks = self.meta_store.scan_chunks()?;
-        for (chunk_key, _cksum) in all_chunks {
-            let chunk_id = chunk_key.strip_prefix("chk:").unwrap_or(&chunk_key);
-            if !referenced.contains(chunk_id) {
-                let _ = self.chunk_store.disks[0].delete_chunk(chunk_id);
-                let _ = self.meta_store.delete_chunk_meta(chunk_id);
+        // Clean up legacy shard files (shouldn't exist, but just in case)
+        for disk in &self.chunk_store.disks {
+            let shards = disk.path.join("shards");
+            if shards.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&shards) {
+                    tracing::warn!(
+                        "Failed to cleanup legacy shards on {}: {}",
+                        disk.path.display(),
+                        e
+                    );
+                }
             }
         }
 
@@ -353,32 +402,44 @@ impl ObjectStorage {
     // -------------------------------------------------------------------------
 
     pub fn recover_on_startup(&self) -> StorageResult<()> {
+        // Clean up incomplete writes (wip/ directories)
+        for disk in &self.chunk_store.disks {
+            if let Err(e) = disk.cleanup_wip() {
+                tracing::warn!("Failed to cleanup wip on {}: {}", disk.path.display(), e);
+            }
+        }
+
+        // Clean up legacy shard files
+        for disk in &self.chunk_store.disks {
+            let shards = disk.path.join("shards");
+            if shards.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&shards) {
+                    tracing::warn!(
+                        "Failed to cleanup legacy shards on {}: {}",
+                        disk.path.display(),
+                        e
+                    );
+                }
+            }
+        }
+
         let all_entries = self.meta_store.scan_versions("", usize::MAX)?;
 
-        for (key, meta) in all_entries {
+        for (_key, meta) in all_entries {
             if meta.status == VersionStatus::Pending {
-                // key format: ver:object_key<SEP>version
-                // Extract object_key by removing the trailing <SEP>version
-                let object_key = if let Some(sep) = key.rfind('\u{1f}') {
-                    key[..sep].strip_prefix("ver:").unwrap_or(&key[4..])
+                // Abandon all pending versions (we don't check shard existence anymore)
+                let object_key = if let Some(sep) = _key.rfind('\u{1f}') {
+                    _key[..sep]
+                        .strip_prefix("ver:")
+                        .map_or(_key.as_str(), |s| s)
                 } else {
-                    key.strip_prefix("ver:").unwrap_or(&key)
+                    _key.strip_prefix("ver:").map_or(_key.as_str(), |s| s)
                 };
-
-                let mut all_exist = true;
-                for chunk_id in &meta.chunk_ids {
-                    if self.chunk_store.disks[0].read(chunk_id).is_err() {
-                        all_exist = false;
-                        break;
-                    }
-                }
-
-                if all_exist && !meta.chunk_ids.is_empty() {
-                    let _ = self.meta_store.promote_version(object_key, meta.version);
-                } else {
-                    let _ = self.meta_store.delete_pending(object_key, meta.version);
-                    tracing::warn!("Abandoned pending version: {object_key}");
-                }
+                let _ = self.meta_store.delete_pending(object_key, meta.version);
+                tracing::warn!(
+                    "Abandoned pending version: {object_key} ver {}",
+                    meta.version
+                );
             }
         }
 

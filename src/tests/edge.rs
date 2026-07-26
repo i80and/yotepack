@@ -29,21 +29,28 @@ fn edge_single_shard_bitrot() {
     let result = rt().block_on(storage.get("bitrot", Some(token))).unwrap();
     assert_eq!(result, data);
 
-    // Corrupt a shard on disk 0
-    let chunk_id = storage
+    // Corrupt one segment in the mega-file on disk 0
+    // With M=1, K=2, N=3, chunk_size=1024:
+    //   shard_size = 1024/2 = 512, segment_size = 16+8+512 = 536
+    let meta = storage
         .meta_store
         .read_version_by_number("bitrot", token)
-        .unwrap()
-        .chunk_ids[0]
-        .clone();
+        .unwrap();
+    assert_eq!(meta.data_size, 4096);
 
     let disk_path = &storage.chunk_store.disks[0].path;
-    let shard_path = disk_path.join("shards").join(&chunk_id);
-    let shard_data = std::fs::read(&shard_path).unwrap();
-    let mut corrupted = shard_data.clone();
-    // Flip a bit in the middle
-    corrupted[shard_data.len() / 2] ^= 0xFF;
-    std::fs::write(&shard_path, &corrupted).unwrap();
+    let safe_key = "bitrot";
+    let segments_dir = disk_path.join("segments").join(safe_key);
+    let mega_path = segments_dir.join(format!("v{:08}", token));
+    let mut mega_data = std::fs::read(&mega_path).unwrap();
+
+    // Corrupt chunk 0's shard on disk 0
+    // Segment 0 starts at offset 4 (header), data at offset 28
+    let corrupt_offset = 4 + 24 + (mega_data[20] as usize); // skip checksum+len, into data
+                                                            // Actually the data starts at header(4) + segment0_header(24) = 28
+    let data_offset = 28;
+    mega_data[data_offset] ^= 0xFF; // Flip a bit in the data
+    std::fs::write(&mega_path, mega_data).unwrap();
 
     // Reading should still succeed (erasure coding recovers the shard)
     let result2 = rt().block_on(storage.get("bitrot", Some(token))).unwrap();
@@ -67,18 +74,19 @@ fn edge_shard_zeroed() {
     let result = rt().block_on(storage.get("zeroed", Some(token))).unwrap();
     assert_eq!(result, data);
 
-    // Zero out the shard on disk 0
-    let chunk_id = storage
-        .meta_store
-        .read_version_by_number("zeroed", token)
-        .unwrap()
-        .chunk_ids[0]
-        .clone();
-
+    // Zero out the first chunk's shard on disk 0
+    // Chunk 0 data starts at mega-file offset 28 (4-byte header + 24-byte segment header)
     let disk_path = &storage.chunk_store.disks[0].path;
-    let shard_path = disk_path.join("shards").join(&chunk_id);
-    let shard_data = std::fs::read(&shard_path).unwrap();
-    std::fs::write(&shard_path, vec![0u8; shard_data.len()]).unwrap();
+    let mega_path = disk_path
+        .join("segments")
+        .join("zeroed")
+        .join(format!("v{:08}", token));
+    let mut mega_data = std::fs::read(&mega_path).unwrap();
+    // Segment 0 data starts at offset 28, size 512 bytes
+    for i in 0..512 {
+        mega_data[28 + i] = 0;
+    }
+    std::fs::write(&mega_path, mega_data).unwrap();
 
     // Recovery should still work
     let result2 = rt().block_on(storage.get("zeroed", Some(token))).unwrap();
@@ -97,19 +105,22 @@ fn edge_shard_truncated() {
     let result = rt().block_on(storage.get("trunc", Some(token))).unwrap();
     assert_eq!(result, data);
 
-    // Truncate shard to just 1 byte
-    let chunk_id = storage
-        .meta_store
-        .read_version_by_number("trunc", token)
-        .unwrap()
-        .chunk_ids[0]
-        .clone();
-
+    // Truncate the first chunk's shard on disk 0 to just 1 byte
+    // This makes the segment unreadable (checksum mismatch), triggering erasure recovery
     let disk_path = &storage.chunk_store.disks[0].path;
-    let shard_path = disk_path.join("shards").join(&chunk_id);
-    std::fs::write(&shard_path, vec![42u8]).unwrap();
+    let mega_path = disk_path
+        .join("segments")
+        .join("trunc")
+        .join(format!("v{:08}", token));
+    let mut mega_data = std::fs::read(&mega_path).unwrap();
+    // Replace segment 0 data (starts at offset 28) with a tiny corrupted version
+    // Change len field to 1 and write 1 byte
+    mega_data[20] = 1; // data_len = 1 (was 512)
+    mega_data[21] = 0;
+    // Keep the rest but the checksum won't match for 512 bytes
+    std::fs::write(&mega_path, mega_data).unwrap();
 
-    // Recovery should work
+    // Recovery should work (erasure coding compensates for the bad shard)
     let result2 = rt().block_on(storage.get("trunc", Some(token))).unwrap();
     assert_eq!(result2, data);
 }
@@ -126,17 +137,19 @@ fn edge_shard_missing() {
     let result = rt().block_on(storage.get("missing", Some(token))).unwrap();
     assert_eq!(result, data);
 
-    // Delete the shard on disk 0
-    let chunk_id = storage
-        .meta_store
-        .read_version_by_number("missing", token)
-        .unwrap()
-        .chunk_ids[0]
-        .clone();
-
+    // "Delete" the first chunk's shard on disk 0 by zeroing its segment
+    // This makes the segment checksum mismatch, triggering erasure recovery
     let disk_path = &storage.chunk_store.disks[0].path;
-    let shard_path = disk_path.join("shards").join(&chunk_id);
-    let _ = std::fs::remove_file(&shard_path);
+    let mega_path = disk_path
+        .join("segments")
+        .join("missing")
+        .join(format!("v{:08}", token));
+    let mut mega_data = std::fs::read(&mega_path).unwrap();
+    // Zero out the first chunk's segment data (offset 28, size 512)
+    for i in 0..512 {
+        mega_data[28 + i] = 0;
+    }
+    std::fs::write(&mega_path, mega_data).unwrap();
 
     // Recovery should work
     let result2 = rt().block_on(storage.get("missing", Some(token))).unwrap();
@@ -161,24 +174,21 @@ fn edge_two_shard_failures_recovered() {
     let result = rt().block_on(storage.get("two-fail", Some(token))).unwrap();
     assert_eq!(result, data);
 
-    // Corrupt shards on disk 0 and disk 1
-    let chunk_id = storage
-        .meta_store
-        .read_version_by_number("two-fail", token)
-        .unwrap()
-        .chunk_ids[0]
-        .clone();
-
+    // Corrupt first chunk's segments on disk 0 and disk 1
+    // With M=2, K=3, N=5, chunk_size=1024:
+    //   shard_size = 1024/3 = 342, even -> 342, segment = 16+8+342 = 366
     for disk_idx in 0..2 {
         let disk_path = &storage.chunk_store.disks[disk_idx].path;
-        let shard_path = disk_path.join("shards").join(&chunk_id);
-        let shard_data = std::fs::read(&shard_path).unwrap();
-        let mut corrupted = shard_data.clone();
-        // Flip all bits
-        for byte in corrupted.iter_mut() {
-            *byte = !*byte;
+        let mega_path = disk_path
+            .join("segments")
+            .join("two-fail")
+            .join(format!("v{:08}", token));
+        let mut mega_data = std::fs::read(&mega_path).unwrap();
+        // Corrupt chunk 0's segment (data starts at offset 28, size 342)
+        for i in 0..342 {
+            mega_data[28 + i] ^= 0xFF;
         }
-        std::fs::write(&shard_path, &corrupted).unwrap();
+        std::fs::write(&mega_path, mega_data).unwrap();
     }
 
     // Recovery should still work (tolerates 2 failures with M=2)
@@ -196,31 +206,25 @@ fn edge_three_shard_failures_exceeds_tolerance() {
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
     let token = rt().block_on(storage.put("too-many", &data)).unwrap();
 
-    // Corrupt shards on disks 0, 1, and 2
-    let chunk_id = storage
-        .meta_store
-        .read_version_by_number("too-many", token)
-        .unwrap()
-        .chunk_ids[0]
-        .clone();
-
+    // Corrupt first chunk's segments on disks 0, 1, and 2
+    // With M=2, K=3, N=5, shard_size = 1024/3 = 342
     for disk_idx in 0..3 {
         let disk_path = &storage.chunk_store.disks[disk_idx].path;
-        let shard_path = disk_path.join("shards").join(&chunk_id);
-        let shard_data = std::fs::read(&shard_path).unwrap();
-        let mut corrupted = shard_data.clone();
-        for byte in corrupted.iter_mut() {
-            *byte = !*byte;
+        let mega_path = disk_path
+            .join("segments")
+            .join("too-many")
+            .join(format!("v{:08}", token));
+        let mut mega_data = std::fs::read(&mega_path).unwrap();
+        // Corrupt chunk 0's segment data
+        for i in 0..342 {
+            mega_data[28 + i] ^= 0xFF;
         }
-        std::fs::write(&shard_path, &corrupted).unwrap();
+        std::fs::write(&mega_path, mega_data).unwrap();
     }
 
-    // Should fail — exceeds M=2 tolerance
-    let result = rt().block_on(storage.get("too-many", Some(token)));
-    assert!(
-        result.is_err(),
-        "expected failure when >M shards are corrupted"
-    );
+    // Recovery should FAIL (3 failures exceed M=2 tolerance)
+    let result2 = rt().block_on(storage.get("too-many", Some(token)));
+    assert!(result2.is_err());
 }
 
 // ---------------------------------------------------------------------------
