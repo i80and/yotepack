@@ -115,37 +115,70 @@ fn prop_version_monotonicity() {
 }
 
 // ---------------------------------------------------------------------------
-// Invariant 3: No ghost data (every chunk is referenced)
+// Invariant 3: Metadata chunk_checksums match actual stored data
 // ---------------------------------------------------------------------------
 
 #[test]
-fn prop_no_ghost_data() {
+fn prop_chunk_data_consistency() {
     proptest!(|(count in 1usize..30usize)| {
-        let tmp = support::test_dir("fuzz_no_ghost");
+        use crate::api::CHUNK_SIZE_DEFAULT;
+        use crate::checksum::checksum;
+
+        let tmp = support::test_dir("fuzz_chunk_data");
         let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
-        // Write some objects
-        let mut chunk_set: HashSet<String> = HashSet::new();
+        // Write objects and remember the data
+        let mut expected: Vec<(String, Vec<u8>, u64)> = Vec::new();
         for i in 0..count {
-            let data = vec![i as u8; 64 + (i % 10) * 64];
-            let _token = rt().block_on(storage.put(&format!("ghost-{i}"), &data)).unwrap();
-            // chunk_ids removed — no longer tracking per-chunk identifiers
+            let data: Vec<u8> = (0..(64 + (i % 10) * 64))
+                .map(|j| ((i * 3 + j * 7) % 256) as u8)
+                .collect();
+            let key = format!("chunkdata-{i}");
+            let token = rt().block_on(storage.put(&key, &data)).unwrap();
+            expected.push((key, data, token));
         }
 
-        // Scan all chunks from metadata
-        let scanned_chunks = storage.meta_store.scan_chunks().unwrap();
-        let scanned_ids: HashSet<String> = scanned_chunks
-            .into_iter()
-            .map(|(k, _)| k.strip_prefix("chk:").unwrap_or(&k).to_string())
-            .collect();
-
-        // All scanned chunks should be referenced
-        for cid in &scanned_ids {
-            assert!(
-                chunk_set.contains(cid),
-                "chunk {cid} is in scan_chunks but not referenced by any committed version (ghost data)"
+        // For each object, verify that metadata chunk_checksums match
+        // the actual data chunks computed from the stored object.
+        for (key, orig_data, token) in &expected {
+            // Read the object back and convert to Vec<u8>
+            let read_vec: Vec<u8> = rt().block_on(storage.get(key, Some(*token))).unwrap().to_vec();
+            assert_eq!(
+                read_vec, *orig_data,
+                "object {key} read-back mismatch"
             );
+
+            // Get metadata and verify chunk_checksums
+            let meta = storage.meta_store.read_version(key).unwrap();
+            assert!(
+                meta.status == VersionStatus::Committed,
+                "object {key} not committed"
+            );
+
+            // Compute expected chunk checksums from the read data
+            let chunk_count = meta.chunk_checksums.len();
+            let mut expected_cksums: Vec<u128> = Vec::new();
+            for chunk_idx in 0..chunk_count {
+                let start = chunk_idx * CHUNK_SIZE_DEFAULT;
+                let end = std::cmp::min(start + CHUNK_SIZE_DEFAULT, read_vec.len());
+                if start < read_vec.len() {
+                    let chunk = &read_vec[start..end];
+                    expected_cksums.push(checksum(chunk));
+                }
+            }
+
+            for (idx, (&stored, &expected)) in meta
+                .chunk_checksums
+                .iter()
+                .zip(expected_cksums.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    stored, expected,
+                    "object {key} chunk {idx} checksum: stored {stored}, expected {expected}"
+                );
+            }
         }
     });
 }

@@ -86,7 +86,7 @@ impl ObjectStorage {
 
             // Compute entry size: 16 (cksum) + 8 (len) + shard_size
             let k = self.chunk_store.k;
-            let shard_size = (expected_chunk_size + k - 1) / k;
+            let shard_size = expected_chunk_size.div_ceil(k);
             let shard_size = shard_size.div_ceil(2) * 2; // even
             let entry_size = 24 + shard_size;
 

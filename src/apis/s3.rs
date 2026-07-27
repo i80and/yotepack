@@ -348,7 +348,7 @@ fn storage_error_to_response(err: StorageError) -> (StatusCode, String, String) 
         StorageError::BucketAlreadyExists(_name) => (
             StatusCode::CONFLICT,
             "BucketAlreadyExists".to_string(),
-            format!("The requested bucket name is not available. The bucket namespace is shared across all users. Please choose a different name.",),
+            "The requested bucket name is not available. The bucket namespace is shared across all users. Please choose a different name.".to_string(),
         ),
         StorageError::BucketNotFound(name) => (
             StatusCode::NOT_FOUND,
@@ -368,7 +368,7 @@ fn storage_error_to_response(err: StorageError) -> (StatusCode, String, String) 
         StorageError::Transient(msg) if msg.contains("not empty") => (
             StatusCode::CONFLICT,
             "BucketNotEmpty".to_string(),
-            format!("The bucket you tried to delete is not empty. Please delete all objects before deleting the bucket."),
+            "The bucket you tried to delete is not empty. Please delete all objects before deleting the bucket.".to_string(),
         ),
         StorageError::NoHealthyDisks => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -424,7 +424,7 @@ async fn create_bucket(State(state): State<S3AppState>, Path(bucket): Path<Strin
             res
         }
         Err(StorageError::BucketAlreadyExists(_)) => {
-            let body = s3_error_xml("BucketAlreadyExists", &format!("The requested bucket name is not available. The bucket namespace is shared across all users. Please choose a different name."));
+            let body = s3_error_xml("BucketAlreadyExists", "The requested bucket name is not available. The bucket namespace is shared across all users. Please choose a different name.");
             let mut headers = HeaderMap::new();
             headers.insert("content-type", "application/xml".parse().unwrap());
             let mut res = Response::new(axum::body::Body::from(body));
@@ -486,7 +486,7 @@ async fn delete_bucket(State(state): State<S3AppState>, Path(bucket): Path<Strin
             res
         }
         Err(StorageError::Transient(msg)) if msg.contains("not empty") => {
-            let body = s3_error_xml("BucketNotEmpty", &format!("The bucket you tried to delete is not empty. Please delete all objects before deleting the bucket."));
+            let body = s3_error_xml("BucketNotEmpty", "The bucket you tried to delete is not empty. Please delete all objects before deleting the bucket.");
             let mut headers = HeaderMap::new();
             headers.insert("content-type", "application/xml".parse().unwrap());
             let mut res = Response::new(axum::body::Body::from(body));
@@ -963,13 +963,6 @@ mod tests {
             buf.clear();
         }
         tags
-    }
-
-    /// Get the text content of a tag in the XML.
-    fn xml_tag(xml: &str, tag: &str) -> Option<String> {
-        xml_tags(xml)
-            .into_iter()
-            .find_map(|(t, v)| if t == tag { Some(v) } else { None })
     }
 
     /// Count how many times a tag appears in the XML.

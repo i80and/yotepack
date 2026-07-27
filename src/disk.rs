@@ -509,11 +509,11 @@ impl ChunkStore {
         // Determine padded size: full chunks use CHUNK_SIZE_DEFAULT, last chunk
         // uses its actual size rounded up to even shard boundary
         let (padded_len, shard_size) = if is_last {
-            let s = (chunk_data.len() + k - 1) / k;
+            let s = chunk_data.len().div_ceil(k);
             let s = s.div_ceil(2) * 2; // even
             (s * k, s)
         } else {
-            (CHUNK_SIZE_DEFAULT, (CHUNK_SIZE_DEFAULT + k - 1) / k)
+            (CHUNK_SIZE_DEFAULT, CHUNK_SIZE_DEFAULT.div_ceil(k))
         };
 
         // Pad chunk_data to padded_len
@@ -705,11 +705,8 @@ impl ChunkStore {
         // Find shards that need correction (bitrot recovery)
         let mut corrections: Vec<(usize, Vec<u8>)> = Vec::new();
         for (i, result) in shard_results.iter().enumerate() {
-            match result {
-                Err(_) => {
-                    corrections.push((i, all_shards[i].clone()));
-                }
-                _ => {}
+            if result.is_err() {
+                corrections.push((i, all_shards[i].clone()));
             }
         }
 
