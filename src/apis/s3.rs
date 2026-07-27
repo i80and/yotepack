@@ -567,16 +567,11 @@ async fn list_objects(
 
     // Collect as sorted vec of (display_key, meta)
     let mut sorted: Vec<_> = latest.into_values().collect();
-    sorted.sort_by_key(|(_, m)| m.chunk_ids.first().cloned().unwrap_or_default());
+    sorted.sort_by_key(|(_, m)| m.version);
 
     // Filter by marker (skip entries before the marker)
     if let Some(marker_str) = marker {
-        sorted.retain(|(_, m)| {
-            m.chunk_ids
-                .first()
-                .map(|cid| cid.as_str() > marker_str)
-                .unwrap_or(false)
-        });
+        sorted.retain(|(_, m)| m.version > u64::from_str_radix(marker_str, 16).unwrap_or(0));
     }
 
     // Determine truncation
@@ -584,7 +579,7 @@ async fn list_objects(
     let next_marker = if is_truncated {
         sorted
             .get(max_keys)
-            .and_then(|(_, m)| m.chunk_ids.first().cloned())
+            .map(|(_, m)| format!("{:08}", m.version))
     } else {
         None
     };

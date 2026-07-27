@@ -129,11 +129,8 @@ fn prop_no_ghost_data() {
         let mut chunk_set: HashSet<String> = HashSet::new();
         for i in 0..count {
             let data = vec![i as u8; 64 + (i % 10) * 64];
-            let token = rt().block_on(storage.put(&format!("ghost-{i}"), &data)).unwrap();
-            let meta = storage.meta_store.read_version_by_number(&format!("ghost-{i}"), token).unwrap();
-            for cid in &meta.chunk_ids {
-                chunk_set.insert(cid.clone());
-            }
+            let _token = rt().block_on(storage.put(&format!("ghost-{i}"), &data)).unwrap();
+            // chunk_ids removed — no longer tracking per-chunk identifiers
         }
 
         // Scan all chunks from metadata
@@ -199,14 +196,10 @@ fn prop_no_ghost_data_after_gc() {
         let storage = ObjectStorage::new(config).unwrap();
 
         // Write and delete objects
-        let mut chunk_set: HashSet<String> = HashSet::new();
         for i in 0..count {
             let data = vec![i as u8; 64];
-            let token = rt().block_on(storage.put(&format!("gc-ghost-{i}"), &data)).unwrap();
-            let meta = storage.meta_store.read_version_by_number(&format!("gc-ghost-{i}"), token).unwrap();
-            for cid in &meta.chunk_ids {
-                chunk_set.insert(cid.clone());
-            }
+            let _token = rt().block_on(storage.put(&format!("gc-ghost-{i}"), &data)).unwrap();
+            // chunk_ids removed — no longer tracking per-chunk identifiers
             storage.delete(&format!("gc-ghost-{i}")).unwrap();
         }
 

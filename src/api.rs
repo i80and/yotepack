@@ -66,7 +66,7 @@ impl ObjectStorage {
             });
         }
 
-        if meta.chunk_ids.is_empty() && meta.chunk_checksums.is_empty() {
+        if meta.chunk_checksums.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -192,7 +192,6 @@ impl ObjectStorage {
                 object_key,
                 next_version,
                 &[],
-                &[],
                 object_checksum,
                 0,
                 std::collections::HashMap::new(),
@@ -243,7 +242,6 @@ impl ObjectStorage {
         self.meta_store.set_pending(
             object_key,
             next_version,
-            &Vec::new(), // chunk_ids - no longer using chunk IDs
             &chunk_checksums,
             object_checksum,
             data_size,
@@ -391,20 +389,6 @@ impl ObjectStorage {
             }
         }
 
-        // Clean up legacy shard files (shouldn't exist, but just in case)
-        for disk in &self.chunk_store.disks {
-            let shards = disk.path.join("shards");
-            if shards.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&shards) {
-                    tracing::warn!(
-                        "Failed to cleanup legacy shards on {}: {}",
-                        disk.path.display(),
-                        e
-                    );
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -417,20 +401,6 @@ impl ObjectStorage {
         for disk in &self.chunk_store.disks {
             if let Err(e) = disk.cleanup_wip() {
                 tracing::warn!("Failed to cleanup wip on {}: {}", disk.path.display(), e);
-            }
-        }
-
-        // Clean up legacy shard files
-        for disk in &self.chunk_store.disks {
-            let shards = disk.path.join("shards");
-            if shards.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&shards) {
-                    tracing::warn!(
-                        "Failed to cleanup legacy shards on {}: {}",
-                        disk.path.display(),
-                        e
-                    );
-                }
             }
         }
 
@@ -549,11 +519,7 @@ impl ObjectStorage {
         // Re-serialize and write back
         let ver_key = format!("ver:{object_key}\u{1f}{latest_version}");
         let serialized = self.meta_store.serialize_meta(&new_meta)?;
-        let chunks_key = format!("{ver_key}\u{1f}chunks");
-        self.meta_store.write_batch(vec![
-            (ver_key, serialized),
-            (chunks_key, serialize_chunk_ids(&new_meta.chunk_ids)),
-        ])
+        self.meta_store.write_batch(vec![(ver_key, serialized)])
     }
 
     /// Get the Content-Type of an object.
@@ -641,18 +607,6 @@ impl ObjectStorage {
     pub fn list_buckets(&self) -> StorageResult<Vec<crate::disk::BucketMeta>> {
         self.meta_store.scan_buckets()
     }
-}
-
-/// Helper to serialize chunk IDs (needed for metadata update ops).
-fn serialize_chunk_ids(chunk_ids: &[String]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(16);
-    buf.extend_from_slice(&(chunk_ids.len() as u64).to_le_bytes());
-    for cid in chunk_ids {
-        let cid_bytes = cid.as_bytes();
-        buf.extend_from_slice(&(cid_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(cid_bytes);
-    }
-    buf
 }
 
 /// An entry returned by LIST operations.

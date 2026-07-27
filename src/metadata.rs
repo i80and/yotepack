@@ -203,7 +203,7 @@ impl ReplicatedMetaStore {
         Ok(buf)
     }
 
-    fn deserialize_meta(&self, bytes: &[u8], object_key: &str) -> StorageResult<VersionMeta> {
+    fn deserialize_meta(&self, bytes: &[u8], _object_key: &str) -> StorageResult<VersionMeta> {
         if bytes.len() < 9 {
             return Err(StorageError::KvError("version metadata too short".into()));
         }
@@ -238,28 +238,6 @@ impl ReplicatedMetaStore {
             Vec::new()
         };
 
-        // Reconstruct the chunks key from the version metadata key.
-        // The key format is "ver:{object_key}<SEP>{version}", so the chunks key is
-        // "ver:{object_key}<SEP>{version}<SEP>chunks".
-        let chunks_key = if object_key.contains('\u{1f}') {
-            format!("{object_key}\u{1f}chunks")
-        } else {
-            // Fallback (should not happen with the new format)
-            format!("ver:{object_key}:{version_num}:chunks")
-        };
-
-        // Try to get chunks from any keyspace
-        let chunk_ids = self
-            .ks
-            .values()
-            .next()
-            .and_then(|ks| {
-                ks.get(chunks_key.as_bytes())
-                    .ok()
-                    .and_then(|v| v.map(|val| deserialize_chunk_ids(&val)))
-            })
-            .unwrap_or_default();
-
         // Parse metadata: length-prefixed JSON at the end of the record.
         let meta_checksums_end = 41 + chunk_checksums.len() * 16;
         let metadata = if bytes.len() >= meta_checksums_end + 4 {
@@ -285,7 +263,6 @@ impl ReplicatedMetaStore {
 
         Ok(VersionMeta {
             version: version_num,
-            chunk_ids,
             chunk_checksums,
             checksum,
             status,
@@ -521,23 +498,11 @@ impl ReplicatedMetaStore {
             .map(|(_, m)| m)
     }
 
-    /// Read chunk checksum from any healthy disk.
-    pub fn read_chunk_checksum(&self, chunk_id: &str) -> StorageResult<u128> {
-        let key = format!("chk:{chunk_id}");
-        let value = self.read(key.as_bytes())?;
-        if value.len() >= 16 {
-            Ok(u128::from_le_bytes(value[..16].try_into().unwrap()))
-        } else {
-            Err(StorageError::KvError("checksum value too short".into()))
-        }
-    }
-
     /// Set a version as pending across all healthy disks.
     pub fn set_pending(
         &self,
         object_key: &str,
         version: u64,
-        chunk_ids: &[String],
         chunk_checksums: &[u128],
         checksum_val: u128,
         data_size: usize,
@@ -546,7 +511,6 @@ impl ReplicatedMetaStore {
         let ver_key = format!("ver:{object_key}{SEP}{version}");
         let meta = VersionMeta {
             version,
-            chunk_ids: chunk_ids.to_vec(),
             chunk_checksums: chunk_checksums.to_vec(),
             checksum: checksum_val,
             status: VersionStatus::Pending,
@@ -556,10 +520,6 @@ impl ReplicatedMetaStore {
 
         let ops = vec![
             (ver_key.clone(), self.serialize_meta(&meta)?),
-            (
-                format!("{ver_key}{SEP}chunks"),
-                serialize_chunk_ids(chunk_ids),
-            ),
             (
                 format!("obj:meta:{object_key}"),
                 version.to_le_bytes().to_vec(),
@@ -575,7 +535,6 @@ impl ReplicatedMetaStore {
     /// doesn't match the expected pending state.
     pub fn promote_version(&self, object_key: &str, target_version: u64) -> StorageResult<()> {
         let ver_key = format!("ver:{object_key}{SEP}{target_version}");
-        let chunks_key = format!("{ver_key}{SEP}chunks");
 
         // Read the current value from any healthy disk to verify it's pending
         let value = self.read(ver_key.as_bytes())?;
@@ -589,10 +548,7 @@ impl ReplicatedMetaStore {
         let mut committed_meta = meta;
         committed_meta.status = VersionStatus::Committed;
 
-        let ops = vec![
-            (ver_key, self.serialize_meta(&committed_meta)?),
-            (chunks_key, serialize_chunk_ids(&committed_meta.chunk_ids)),
-        ];
+        let ops = vec![(ver_key, self.serialize_meta(&committed_meta)?)];
 
         self.write_batch(ops)
     }
@@ -619,12 +575,8 @@ impl ReplicatedMetaStore {
     /// Delete a pending version from all healthy disks.
     pub fn delete_pending(&self, object_key: &str, version: u64) -> StorageResult<()> {
         let ver_key = format!("ver:{object_key}{SEP}{version}");
-        let chunks_key = format!("{ver_key}{SEP}chunks");
 
-        let ops = vec![
-            (ver_key, vec![0]), // Mark for deletion
-            (chunks_key, vec![0]),
-        ];
+        let ops = vec![(ver_key, vec![0])]; // Mark for deletion
 
         self.write_batch(ops)
     }
@@ -633,16 +585,11 @@ impl ReplicatedMetaStore {
     pub fn mark_deleted(&self, object_key: &str) -> StorageResult<()> {
         let latest_version = self.read_latest_version(object_key)?;
         let ver_key = format!("ver:{object_key}{SEP}{latest_version}");
-        let chunks_key = format!("{ver_key}{SEP}chunks");
-
         let value = self.read(ver_key.as_bytes())?;
         let mut meta = self.deserialize_meta(&value, &ver_key)?;
         meta.status = VersionStatus::Deleted;
 
-        let ops = vec![
-            (ver_key, self.serialize_meta(&meta)?),
-            (chunks_key, serialize_chunk_ids(&meta.chunk_ids)),
-        ];
+        let ops = vec![(ver_key, self.serialize_meta(&meta)?)];
 
         self.write_batch(ops)
     }
@@ -745,11 +692,6 @@ impl ReplicatedMetaStore {
             }
         }
         Ok(false)
-    }
-
-    /// Delete a chunk metadata entry.
-    pub fn delete_chunk_meta(&self, chunk_id: &str) -> StorageResult<()> {
-        self.delete_keys(vec![format!("chk:{chunk_id}")])
     }
 
     // -----------------------------------------------------------------------
@@ -971,41 +913,3 @@ impl ReplicatedMetaStore {
 
 // ---------------------------------------------------------------------------
 // Chunk ID serialization helpers
-// ---------------------------------------------------------------------------
-
-fn serialize_chunk_ids(chunk_ids: &[String]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(16);
-    buf.extend_from_slice(&(chunk_ids.len() as u64).to_le_bytes());
-    for cid in chunk_ids {
-        let cid_bytes = cid.as_bytes();
-        buf.extend_from_slice(&(cid_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(cid_bytes);
-    }
-    buf
-}
-
-fn deserialize_chunk_ids(bytes: &[u8]) -> Vec<String> {
-    if bytes.len() < 8 {
-        return Vec::new();
-    }
-
-    let count = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
-    let mut chunk_ids = Vec::with_capacity(count);
-    let mut offset = 8;
-
-    for _ in 0..count {
-        if offset + 2 > bytes.len() {
-            break;
-        }
-        let len = u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as usize;
-        offset += 2;
-        if offset + len > bytes.len() {
-            break;
-        }
-        let cid = String::from_utf8_lossy(&bytes[offset..offset + len]).to_string();
-        chunk_ids.push(cid);
-        offset += len;
-    }
-
-    chunk_ids
-}

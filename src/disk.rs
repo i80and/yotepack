@@ -47,7 +47,6 @@ impl VersionStatus {
 #[derive(Debug, Clone)]
 pub struct VersionMeta {
     pub version: u64,
-    pub chunk_ids: Vec<String>,
     /// Per-chunk xxHash3-128 checksums (of chunk data before erasure encoding).
     pub chunk_checksums: Vec<u128>,
     pub checksum: u128,
@@ -321,7 +320,7 @@ impl Disk {
                 results.push(Ok(data));
             }
         } else {
-            // Sequential read (legacy / full enumeration path)
+            // Sequential read for full enumeration
             loop {
                 let mut cksum_buf = [0u8; 16];
                 match reader.read_exact(&mut cksum_buf) {
@@ -365,53 +364,6 @@ impl Disk {
         }
 
         Ok(results)
-    }
-
-    /// Legacy: read chunk data from per-chunk file (bitrot correction path).
-    #[allow(dead_code)]
-    pub fn read_legacy(&self, chunk_id: &str) -> StorageResult<Vec<u8>> {
-        if *self.is_failed.lock().unwrap() {
-            return Err(StorageError::DiskFailed(format!(
-                "disk {} is marked as failed",
-                self.path.display()
-            )));
-        }
-
-        let chunk_path = self.path.join("shards").join(chunk_id);
-        let file_data = std::fs::read(&chunk_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                StorageError::Transient(format!(
-                    "chunk {} not found on disk {}: {}",
-                    chunk_id,
-                    self.path.display(),
-                    e
-                ))
-            } else {
-                StorageError::Transient(format!("read from {} failed: {e}", self.path.display()))
-            }
-        })?;
-
-        if file_data.len() < 16 {
-            return Err(StorageError::Transient(format!(
-                "chunk {} on {} is corrupted (too short)",
-                chunk_id,
-                self.path.display()
-            )));
-        }
-
-        let stored_cksum =
-            u128::from_le_bytes(file_data[file_data.len() - 16..].try_into().unwrap());
-        let data = &file_data[..file_data.len() - 16];
-
-        let actual_cksum = checksum::checksum(data);
-        if actual_cksum != stored_cksum {
-            return Err(StorageError::ChecksumMismatch {
-                expected: stored_cksum,
-                actual: actual_cksum,
-            });
-        }
-
-        Ok(data.to_vec())
     }
 
     /// Fix a corrupted entry in a mega-file by rewriting it.
@@ -476,45 +428,6 @@ impl Disk {
         std::fs::rename(&tmp, &path)
             .map_err(|e| StorageError::Transient(format!("rename correction failed: {e}")))?;
 
-        Ok(())
-    }
-
-    /// Legacy: write chunk data to per-chunk file (bitrot correction path).
-    #[allow(dead_code)]
-    pub fn write_legacy(&self, chunk_id: &str, data: &[u8], cksum: u128) -> StorageResult<()> {
-        if *self.is_failed.lock().unwrap() {
-            return Err(StorageError::DiskFailed(format!(
-                "disk {} is marked as failed",
-                self.path.display()
-            )));
-        }
-
-        let shards_path = self.path.join("shards");
-        std::fs::create_dir_all(&shards_path).map_err(|e| {
-            StorageError::Transient(format!("failed to create shards directory: {e}"))
-        })?;
-
-        let chunk_path = shards_path.join(chunk_id);
-        // Write data + checksum (16 bytes) at the end
-        let mut file_data = Vec::with_capacity(data.len() + 16);
-        file_data.extend_from_slice(data);
-        file_data.extend_from_slice(&cksum.to_le_bytes());
-
-        std::fs::write(&chunk_path, &file_data).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                *self.is_failed.lock().unwrap() = true;
-                StorageError::DiskFailed(format!("write to {} failed: {e}", self.path.display()))
-            } else {
-                StorageError::Transient(format!("write to {} failed: {e}", self.path.display()))
-            }
-        })
-    }
-
-    /// Legacy: delete a chunk file from shards directory.
-    #[allow(dead_code)]
-    pub fn delete_chunk(&self, chunk_id: &str) -> StorageResult<()> {
-        let chunk_path = self.path.join("shards").join(chunk_id);
-        let _ = std::fs::remove_file(&chunk_path);
         Ok(())
     }
 }
@@ -801,44 +714,5 @@ impl ChunkStore {
         }
 
         Ok((reconstructed_data, corrections))
-    }
-
-    /// Legacy: write chunk shards to per-chunk files (bitrot correction).
-    #[allow(dead_code)]
-    pub fn write_chunk_legacy(
-        &self,
-        chunk_id: &str,
-        data: &[u8],
-        _object_cksum: u128,
-    ) -> StorageResult<u128> {
-        let chunk_cksum = checksum::checksum(data);
-        let k = self.coder.data_shards();
-        let shard_size = data.len().div_ceil(k);
-        let shard_size = shard_size.div_ceil(2) * 2;
-
-        let mut data_shards: Vec<Vec<u8>> = Vec::with_capacity(k);
-        for i in 0..k {
-            let start = i * shard_size;
-            let end = std::cmp::min(start + shard_size, data.len());
-            let mut shard = if start < data.len() {
-                data[start..end].to_vec()
-            } else {
-                vec![0u8; shard_size]
-            };
-            while shard.len() < shard_size {
-                shard.push(0);
-            }
-            data_shards.push(shard);
-        }
-
-        let shard_refs: Vec<&[u8]> = data_shards.iter().map(|s| s.as_slice()).collect();
-        let all_shards = self.coder.encode(&shard_refs)?;
-
-        for (shard_data, disk) in all_shards.iter().zip(self.disks.iter()) {
-            let shard_cksum = checksum::checksum(shard_data);
-            disk.write_legacy(chunk_id, shard_data, shard_cksum)?;
-        }
-
-        Ok(chunk_cksum)
     }
 }
