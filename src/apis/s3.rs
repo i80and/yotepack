@@ -1012,7 +1012,6 @@ mod tests {
         Config {
             disk_paths,
             disk_failures: 1,
-            chunk_size: 1024,
             metadata_replicas: 0,
             disk_uuids: Vec::new(),
         }

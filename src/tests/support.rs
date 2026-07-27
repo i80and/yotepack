@@ -18,15 +18,9 @@ pub fn test_dir(name: &str) -> TempDir {
 ///
 /// Creates one temp directory per shard slot.
 /// - M = disk_failures, K = M+1 data shards, C = M parity shards, N = 2M+1 total shards
-/// - chunk_size = custom
 /// - metadata_replicas = custom
 /// - disk_uuids: empty means "generate on startup"
-pub fn make_test_config(
-    tmp: &TempDir,
-    disk_failures: u32,
-    chunk_size: usize,
-    metadata_replicas: usize,
-) -> Config {
+pub fn make_test_config(tmp: &TempDir, disk_failures: u32, metadata_replicas: usize) -> Config {
     let n = disk_failures * 2 + 1;
     let disk_paths: Vec<String> = (0..n)
         .map(|i| tmp.path().join(format!("disk_{i}")))
@@ -36,7 +30,6 @@ pub fn make_test_config(
     Config {
         disk_paths,
         disk_failures,
-        chunk_size,
         metadata_replicas,
         disk_uuids: Vec::new(),
     }

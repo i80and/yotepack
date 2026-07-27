@@ -1,10 +1,11 @@
+use crate::api::CHUNK_SIZE_DEFAULT;
 use crate::checksum;
 /// Disk management and chunk storage operations.
 use crate::config::Config;
 use crate::erasure::ErasureCoder;
 use crate::errors::{StorageError, StorageResult};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, Write};
 
 /// Status of a version in the KV store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub struct VersionMeta {
 pub struct WriteHandle {
     pub version: u64,
     pub chunk_size: u32,
+    pub actual_data_len: usize,
     file: std::fs::File,
     tmp_path: std::path::PathBuf,
     final_path: std::path::PathBuf,
@@ -169,6 +171,7 @@ impl Disk {
         object_key: &str,
         version: u64,
         chunk_size: u32,
+        actual_data_len: usize,
     ) -> StorageResult<WriteHandle> {
         let wip = self.wip_path(object_key);
         std::fs::create_dir_all(&wip)
@@ -189,8 +192,8 @@ impl Disk {
             .open(&tmp_path)
             .map_err(|e| StorageError::Transient(format!("failed to create mega-file: {e}")))?;
 
-        // Write chunk_size header (first 4 bytes)
-        file.write_all(&chunk_size.to_le_bytes())
+        // Write actual data length to header (for correct offset calculation on read)
+        file.write_all(&(actual_data_len as u32).to_le_bytes())
             .map_err(|e| StorageError::Transient(format!("failed to write header: {e}")))?;
 
         let final_path = segments.join(format!("v{version:08}"));
@@ -198,6 +201,7 @@ impl Disk {
         Ok(WriteHandle {
             version,
             chunk_size,
+            actual_data_len,
             file,
             tmp_path,
             final_path,
@@ -235,15 +239,18 @@ impl Disk {
         Ok(())
     }
 
-    /// Read one chunk's shard from a mega-file and verify its checksum.
-    pub fn read_chunk(
+    /// Read all chunk entries from a mega-file sequentially.
+    /// Read a single chunk entry from a mega-file.
+    /// If `target_chunk` is provided, seeks directly to that chunk's entry.
+    /// `entry_size` is the size of the entry for the target chunk.
+    /// Returns Vec with one result (the target shard).
+    pub fn read_all_shards(
         &self,
         object_key: &str,
-        chunk_size: u32,
-        chunk_idx: usize,
-        shard_size: usize,
+        target_chunk: Option<usize>,
+        entry_size: usize,
         version: u64,
-    ) -> StorageResult<Vec<u8>> {
+    ) -> StorageResult<Vec<Result<Vec<u8>, StorageError>>> {
         if *self.is_failed.lock().unwrap() {
             return Err(StorageError::DiskFailed(format!(
                 "disk {} is marked as failed",
@@ -268,54 +275,86 @@ impl Disk {
         })?;
         let mut reader = std::io::BufReader::new(file);
 
-        // Verify chunk_size matches header
-        let mut header = [0u8; 4];
+        // Read header (4 bytes, format marker = 0)
+        let mut _header = [0u8; 4];
         reader
-            .read_exact(&mut header)
+            .read_exact(&mut _header)
             .map_err(|e| StorageError::Transient(format!("failed to read header: {e}")))?;
-        let stored_chunk_size = u32::from_le_bytes(header);
-        if stored_chunk_size != chunk_size {
-            return Err(StorageError::Transient(format!(
-                "chunk size mismatch: expected {}, got {}",
-                chunk_size, stored_chunk_size
-            )));
+
+        let mut results = Vec::new();
+
+        if let Some(chunk_idx) = target_chunk {
+            // Direct seek to target chunk's entry
+            let offset = 4 + chunk_idx * entry_size;
+            reader
+                .seek(std::io::SeekFrom::Start(offset as u64))
+                .map_err(|e| StorageError::Transient(format!("seek failed: {e}")))?;
+
+            let mut cksum_buf = [0u8; 16];
+            reader
+                .read_exact(&mut cksum_buf)
+                .map_err(|e| StorageError::Transient(format!("read checksum failed: {e}")))?;
+            let stored_cksum = u128::from_le_bytes(cksum_buf);
+
+            let mut len_buf = [0u8; 8];
+            reader
+                .read_exact(&mut len_buf)
+                .map_err(|e| StorageError::Transient(format!("read length failed: {e}")))?;
+            let data_len = u64::from_le_bytes(len_buf) as usize;
+
+            let mut data = vec![0u8; data_len];
+            reader
+                .read_exact(&mut data)
+                .map_err(|e| StorageError::Transient(format!("read data failed: {e}")))?;
+
+            let actual_cksum = checksum::checksum(&data);
+            if actual_cksum != stored_cksum {
+                results.push(Err(StorageError::ChecksumMismatch {
+                    expected: stored_cksum,
+                    actual: actual_cksum,
+                }));
+            } else {
+                results.push(Ok(data));
+            }
+        } else {
+            // Sequential read (legacy / full enumeration path)
+            loop {
+                let mut cksum_buf = [0u8; 16];
+                match reader.read_exact(&mut cksum_buf) {
+                    Ok(()) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => {
+                        return Err(StorageError::Transient(format!(
+                            "read checksum failed: {e}"
+                        )));
+                    }
+                }
+                let stored_cksum = u128::from_le_bytes(cksum_buf);
+
+                let mut len_buf = [0u8; 8];
+                reader
+                    .read_exact(&mut len_buf)
+                    .map_err(|e| StorageError::Transient(format!("read length failed: {e}")))?;
+                let data_len = u64::from_le_bytes(len_buf) as usize;
+
+                let mut data = vec![0u8; data_len];
+                reader
+                    .read_exact(&mut data)
+                    .map_err(|e| StorageError::Transient(format!("read data failed: {e}")))?;
+
+                let actual_cksum = checksum::checksum(&data);
+                if actual_cksum != stored_cksum {
+                    results.push(Err(StorageError::ChecksumMismatch {
+                        expected: stored_cksum,
+                        actual: actual_cksum,
+                    }));
+                } else {
+                    results.push(Ok(data));
+                }
+            }
         }
 
-        let offset = 4 + chunk_idx * (24 + shard_size);
-        reader
-            .seek(SeekFrom::Start(offset as u64))
-            .map_err(|e| StorageError::Transient(format!("seek failed: {e}")))?;
-
-        // Read checksum (16 bytes)
-        let mut cksum_buf = [0u8; 16];
-        reader
-            .read_exact(&mut cksum_buf)
-            .map_err(|e| StorageError::Transient(format!("read checksum failed: {e}")))?;
-        let stored_cksum = u128::from_le_bytes(cksum_buf);
-
-        // Read length (8 bytes)
-        let mut len_buf = [0u8; 8];
-        reader
-            .read_exact(&mut len_buf)
-            .map_err(|e| StorageError::Transient(format!("read length failed: {e}")))?;
-        let data_len = u64::from_le_bytes(len_buf) as usize;
-
-        // Read data
-        let mut data = vec![0u8; data_len];
-        reader
-            .read_exact(&mut data)
-            .map_err(|e| StorageError::Transient(format!("read data failed: {e}")))?;
-
-        // Verify checksum
-        let actual_cksum = checksum::checksum(&data);
-        if actual_cksum != stored_cksum {
-            return Err(StorageError::ChecksumMismatch {
-                expected: stored_cksum,
-                actual: actual_cksum,
-            });
-        }
-
-        Ok(data)
+        Ok(results)
     }
 
     /// Legacy: read chunk data from per-chunk file (bitrot correction path).
@@ -410,6 +449,7 @@ pub struct ChunkStore {
     pub disks: Vec<Disk>,
     pub coder: ErasureCoder,
     pub num_disks: usize,
+    pub k: usize, // Number of data shards (fixed per cluster)
 }
 
 impl ChunkStore {
@@ -417,6 +457,8 @@ impl ChunkStore {
         config.validate().map_err(StorageError::Transient)?;
 
         let num_disks = config.disk_paths.len();
+        let coder = ErasureCoder::new(config);
+        let k = coder.data_shards();
         let mut disks = Vec::with_capacity(num_disks);
 
         // Parse UUIDs from config (may be empty → generate fresh)
@@ -453,8 +495,9 @@ impl ChunkStore {
 
         Ok(Self {
             disks,
-            coder: ErasureCoder::new(config),
+            coder,
             num_disks,
+            k,
         })
     }
 
@@ -462,34 +505,39 @@ impl ChunkStore {
     /// The caller must have opened mega-files (via Disk::open_write) before
     /// calling this. Each disk's handle is stored in `handles[disk_idx]`.
     ///
-    /// `chunk_size` is the configured chunk size (used for fixed segment sizing).
+    /// Chunks 0..M-1 are padded to CHUNK_SIZE_DEFAULT → fixed entry size.
+    /// The last chunk is padded to a multiple of shard_size → its own entry size.
     /// Returns: (per-chunk checksum, per-shard segment checksums)
     pub fn encode_and_append(
         &self,
         chunk_data: &[u8],
-        chunk_size: u32,
+        _chunk_size: u32,
+        is_last: bool,
         handles: &mut [Option<crate::disk::WriteHandle>],
     ) -> StorageResult<(u128, Vec<u128>)> {
         let chunk_cksum = checksum::checksum(chunk_data);
-        let k = self.coder.data_shards();
-        // Always use chunk_size for consistent segment sizes (last chunk padded)
-        let shard_size = chunk_size.div_ceil(k as u32) as usize;
-        let shard_size = shard_size.div_ceil(2) * 2; // Reed-Solomon: even
+        let k = self.k;
 
-        // Split data into K sub-shards
+        // Determine padded size: full chunks use CHUNK_SIZE_DEFAULT, last chunk
+        // uses its actual size rounded up to even shard boundary
+        let (padded_len, shard_size) = if is_last {
+            let s = (chunk_data.len() + k - 1) / k;
+            let s = s.div_ceil(2) * 2; // even
+            (s * k, s)
+        } else {
+            (CHUNK_SIZE_DEFAULT, (CHUNK_SIZE_DEFAULT + k - 1) / k)
+        };
+
+        // Pad chunk_data to padded_len
+        let mut padded = vec![0u8; padded_len];
+        padded[..chunk_data.len()].copy_from_slice(chunk_data);
+
+        // Split into K sub-shards (each exactly shard_size)
         let mut data_shards: Vec<Vec<u8>> = Vec::with_capacity(k);
         for i in 0..k {
             let start = i * shard_size;
-            let end = std::cmp::min(start + shard_size, chunk_data.len());
-            let mut shard = if start < chunk_data.len() {
-                chunk_data[start..end].to_vec()
-            } else {
-                vec![0u8; shard_size]
-            };
-            while shard.len() < shard_size {
-                shard.push(0);
-            }
-            data_shards.push(shard);
+            let end = start + shard_size;
+            data_shards.push(padded[start..end].to_vec());
         }
 
         // Encode K data shards into N total shards
@@ -511,19 +559,17 @@ impl ChunkStore {
     }
 
     /// Read a single chunk's shard from the mega-file for a given version.
+    /// Seeks directly to the chunk's entry (one seek per disk).
     /// Returns per-disk results for recovery.
+    /// `entry_size` is the size of the entry for this chunk (callers must compute
+    /// this — last chunk may have a different entry size from earlier chunks).
     pub fn read_chunk(
         &self,
         object_key: &str,
         chunk_idx: usize,
-        chunk_size: u32,
+        entry_size: usize,
         version: u64,
     ) -> Vec<Result<Vec<u8>, StorageError>> {
-        // Compute shard_size from chunk_size (must match what was written)
-        let k = self.coder.data_shards();
-        let shard_size = chunk_size.div_ceil(k as u32) as usize;
-        let shard_size = shard_size.div_ceil(2) * 2; // Reed-Solomon: even
-
         let mut results = Vec::with_capacity(self.num_disks);
 
         for disk in self.disks.iter() {
@@ -534,14 +580,26 @@ impl ChunkStore {
                 ))));
                 continue;
             }
-            match disk.read_chunk(object_key, chunk_size, chunk_idx, shard_size, version) {
-                Ok(data) => {
-                    results.push(Ok(data));
+            match disk.read_all_shards(object_key, Some(chunk_idx), entry_size, version) {
+                Ok(all_shards) => {
+                    if all_shards.is_empty() {
+                        results.push(Err(StorageError::Transient(format!(
+                            "no shards returned for chunk {} version {} on disk {}",
+                            chunk_idx,
+                            version,
+                            disk.path.display()
+                        ))));
+                    } else {
+                        match &all_shards[0] {
+                            Ok(data) => results.push(Ok(data.clone())),
+                            Err(e) => results.push(Err(e.clone())),
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(
-                        "Failed to read chunk {} on disk {}: {}",
-                        chunk_idx,
+                        "Failed to read version {} on disk {}: {}",
+                        version,
                         disk.path.display(),
                         e
                     );

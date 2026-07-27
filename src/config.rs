@@ -7,8 +7,6 @@ pub struct Config {
     /// Number of tolerable disk failures (M) for data layer.
     /// Derives: K = M+1 data shards, C = M parity shards, N = 2M+1 total shards.
     pub disk_failures: u32,
-    /// Chunk size in bytes (default: 64 MiB).
-    pub chunk_size: usize,
     /// Number of metadata replicas (must be <= total_shards). 0 = all disks.
     pub metadata_replicas: usize,
     /// Ordered list of expected disk cluster IDs, one per disk slot.

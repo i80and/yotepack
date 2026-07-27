@@ -18,7 +18,7 @@ fn rt() -> &'static tokio::runtime::Runtime {
 #[test]
 fn edge_single_shard_bitrot() {
     let tmp = support::test_dir("edge_shard_bitrot");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write an object
@@ -30,8 +30,7 @@ fn edge_single_shard_bitrot() {
     assert_eq!(result, data);
 
     // Corrupt one segment in the mega-file on disk 0
-    // With M=1, K=2, N=3, chunk_size=1024:
-    //   shard_size = 1024/2 = 512, segment_size = 16+8+512 = 536
+    // With M=1, K=2, N=3: shard_size = 1024/2 = 512, segment = 16+8+512 = 536
     let meta = storage
         .meta_store
         .read_version_by_number("bitrot", token)
@@ -44,12 +43,8 @@ fn edge_single_shard_bitrot() {
     let mega_path = segments_dir.join(format!("v{:08}", token));
     let mut mega_data = std::fs::read(&mega_path).unwrap();
 
-    // Corrupt chunk 0's shard on disk 0
-    // Segment 0 starts at offset 4 (header), data at offset 28
-    let corrupt_offset = 4 + 24 + (mega_data[20] as usize); // skip checksum+len, into data
-                                                            // Actually the data starts at header(4) + segment0_header(24) = 28
-    let data_offset = 28;
-    mega_data[data_offset] ^= 0xFF; // Flip a bit in the data
+    // Corrupt chunk 0's shard on disk 0 (flip a bit in the data area)
+    mega_data[28] ^= 0xFF; // Flip a bit in the first data byte
     std::fs::write(&mega_path, mega_data).unwrap();
 
     // Reading should still succeed (erasure coding recovers the shard)
@@ -64,7 +59,7 @@ fn edge_single_shard_bitrot() {
 #[test]
 fn edge_shard_zeroed() {
     let tmp = support::test_dir("edge_shard_zeroed");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| (i % 256) as u8).collect();
@@ -96,7 +91,7 @@ fn edge_shard_zeroed() {
 #[test]
 fn edge_shard_truncated() {
     let tmp = support::test_dir("edge_shard_trunc");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| i as u8).collect();
@@ -105,19 +100,18 @@ fn edge_shard_truncated() {
     let result = rt().block_on(storage.get("trunc", Some(token))).unwrap();
     assert_eq!(result, data);
 
-    // Truncate the first chunk's shard on disk 0 to just 1 byte
-    // This makes the segment unreadable (checksum mismatch), triggering erasure recovery
+    // Truncate the first chunk's shard on disk 0 to make it unreadable,
+    // triggering erasure recovery. Corrupt the checksum of the first entry
+    // (the exact length is unknown in variable-length format, so we flip
+    // a byte in the 16-byte checksum area).
     let disk_path = &storage.chunk_store.disks[0].path;
     let mega_path = disk_path
         .join("segments")
         .join("trunc")
         .join(format!("v{:08}", token));
     let mut mega_data = std::fs::read(&mega_path).unwrap();
-    // Replace segment 0 data (starts at offset 28) with a tiny corrupted version
-    // Change len field to 1 and write 1 byte
-    mega_data[20] = 1; // data_len = 1 (was 512)
-    mega_data[21] = 0;
-    // Keep the rest but the checksum won't match for 512 bytes
+    // Corrupt the first entry's checksum (bytes 4-19)
+    mega_data[4] ^= 0xFF;
     std::fs::write(&mega_path, mega_data).unwrap();
 
     // Recovery should work (erasure coding compensates for the bad shard)
@@ -128,7 +122,7 @@ fn edge_shard_truncated() {
 #[test]
 fn edge_shard_missing() {
     let tmp = support::test_dir("edge_shard_missing");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| i as u8).collect();
@@ -164,7 +158,7 @@ fn edge_shard_missing() {
 fn edge_two_shard_failures_recovered() {
     let tmp = support::test_dir("edge_two_failures");
     // Use M=2 to tolerate 2 disk failures
-    let config = support::make_test_config(&tmp, 2, 1024, 0);
+    let config = support::make_test_config(&tmp, 2, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
@@ -175,7 +169,7 @@ fn edge_two_shard_failures_recovered() {
     assert_eq!(result, data);
 
     // Corrupt first chunk's segments on disk 0 and disk 1
-    // With M=2, K=3, N=5, chunk_size=1024:
+    // With M=2, K=3, N=5:
     //   shard_size = 1024/3 = 342, even -> 342, segment = 16+8+342 = 366
     for disk_idx in 0..2 {
         let disk_path = &storage.chunk_store.disks[disk_idx].path;
@@ -200,7 +194,7 @@ fn edge_two_shard_failures_recovered() {
 fn edge_three_shard_failures_exceeds_tolerance() {
     let tmp = support::test_dir("edge_three_failures");
     // Use M=2 — only tolerates 2 failures, 3 should fail
-    let config = support::make_test_config(&tmp, 2, 1024, 0);
+    let config = support::make_test_config(&tmp, 2, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
@@ -234,7 +228,7 @@ fn edge_three_shard_failures_exceeds_tolerance() {
 #[test]
 fn edge_metadata_disk_io_failure() {
     let tmp = support::test_dir("edge_meta_io");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data = b"meta-fail-test";
@@ -260,7 +254,7 @@ fn edge_metadata_disk_io_failure() {
 fn edge_pending_version_without_shards() {
     // Simulates a crash between set_pending and chunk writes
     let tmp = support::test_dir("edge_pending_no_shards");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
 
     // Write and commit first object
     {
@@ -281,7 +275,7 @@ fn edge_pending_version_without_shards() {
 #[test]
 fn edge_multiple_pending_versions() {
     let tmp = support::test_dir("edge_multi_pending");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
 
     // Write multiple objects
     {
@@ -315,7 +309,7 @@ fn edge_multiple_pending_versions() {
 #[test]
 fn edge_gc_after_partial_writes() {
     let tmp = support::test_dir("edge_gc_partial");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write and commit
@@ -333,7 +327,7 @@ fn edge_gc_after_partial_writes() {
 #[test]
 fn edge_gc_empty_store() {
     let tmp = support::test_dir("edge_gc_empty");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // GC on empty store should not error
@@ -344,7 +338,7 @@ fn edge_gc_empty_store() {
 #[test]
 fn edge_gc_delete_then_recreate() {
     let tmp = support::test_dir("edge_gc_recreate");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write, delete, GC, then write again
@@ -372,7 +366,7 @@ fn edge_gc_delete_then_recreate() {
 fn edge_rapid_concurrent_writes_same_key() {
     // Simulates rapid successive writes to the same key
     let tmp = support::test_dir("edge_rapid_writes");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let mut last_version = 0u64;
@@ -398,7 +392,7 @@ fn edge_rapid_concurrent_writes_same_key() {
 fn edge_version_number_stress() {
     // Verify version counters work under heavy write load
     let tmp = support::test_dir("edge_version_stress");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let mut prev = 0u64;
@@ -421,7 +415,7 @@ fn edge_version_number_stress() {
 #[test]
 fn edge_single_byte_object() {
     let tmp = support::test_dir("edge_single_byte");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data = vec![0xFFu8];
@@ -433,7 +427,7 @@ fn edge_single_byte_object() {
 #[test]
 fn edge_null_byte_object() {
     let tmp = support::test_dir("edge_null_bytes");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
@@ -447,7 +441,7 @@ fn edge_null_byte_object() {
 #[test]
 fn edge_repeated_data() {
     let tmp = support::test_dir("edge_repeated");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // 1024 copies of the same byte — tests erasure coding on highly redundant data
@@ -465,7 +459,7 @@ fn edge_repeated_data() {
 fn edge_cluster_id_fresh_generation() {
     // Fresh disks with no config UUIDs → UUIDs are generated and written
     let tmp = support::test_dir("edge_cluster_fresh");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Each disk should have a .cluster_id file with a valid UUID
@@ -502,7 +496,6 @@ fn edge_cluster_id_explicit_config() {
     let config1 = crate::Config {
         disk_paths: disk_paths.clone(),
         disk_failures: 1,
-        chunk_size: 1024,
         metadata_replicas: 0,
         disk_uuids: Vec::new(),
     };
@@ -524,7 +517,6 @@ fn edge_cluster_id_explicit_config() {
     let config2 = crate::Config {
         disk_paths,
         disk_failures: 1,
-        chunk_size: 1024,
         metadata_replicas: 0,
         disk_uuids: uuids.clone(),
     };
@@ -557,7 +549,7 @@ fn edge_cluster_id_mismatch_rejected() {
     let tmp = support::test_dir("edge_cluster_mismatch");
 
     // First pass: generate UUIDs
-    let config1 = support::make_test_config(&tmp, 1, 1024, 0);
+    let config1 = support::make_test_config(&tmp, 1, 0);
     let storage1 = ObjectStorage::new(config1).unwrap();
 
     // Build config with a modified UUID for disk 0
@@ -579,7 +571,6 @@ fn edge_cluster_id_mismatch_rejected() {
     let config2 = crate::Config {
         disk_paths,
         disk_failures: 1,
-        chunk_size: 1024,
         metadata_replicas: 0,
         disk_uuids: uuids,
     };
@@ -601,13 +592,12 @@ fn edge_cluster_id_mismatch_rejected() {
 fn edge_cluster_id_count_mismatch_rejected() {
     // Config with wrong number of UUIDs → should error
     let tmp = support::test_dir("edge_cluster_count");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
 
     // Mismatched count (1 UUID for 3 disks)
     let config_bad = crate::Config {
         disk_paths: config.disk_paths.clone(),
         disk_failures: config.disk_failures,
-        chunk_size: config.chunk_size,
         metadata_replicas: config.metadata_replicas,
         disk_uuids: vec![uuid::Uuid::new_v4().to_string()], // 1 instead of 3
     };
@@ -631,7 +621,7 @@ fn edge_cluster_id_count_mismatch_rejected() {
 #[test]
 fn edge_empty_key_rejected() {
     let tmp = support::test_dir("edge_empty_key");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // PUT with empty key should fail

@@ -23,7 +23,7 @@ fn rt() -> &'static tokio::runtime::Runtime {
 #[test]
 fn smoke_put_get_basic() {
     let tmp = support::test_dir("smoke_put_get_basic");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let data = b"Hello, erasure-coded world!";
@@ -37,7 +37,7 @@ fn smoke_put_get_basic() {
 #[test]
 fn smoke_put_get_multiple_objects() {
     let tmp = support::test_dir("smoke_put_get_many");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write 10 objects
@@ -61,7 +61,7 @@ fn smoke_put_get_multiple_objects() {
 #[test]
 fn smoke_put_get_no_token() {
     let tmp = support::test_dir("smoke_put_get_no_token");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     rt().block_on(storage.put("key", b"data")).unwrap();
@@ -74,7 +74,7 @@ fn smoke_put_get_no_token() {
 #[test]
 fn smoke_read_latest_version() {
     let tmp = support::test_dir("smoke_read_latest");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let _v1 = rt().block_on(storage.put("key", b"v1")).unwrap();
@@ -97,7 +97,7 @@ fn smoke_read_latest_version() {
 #[test]
 fn smoke_version_concurrency() {
     let tmp = support::test_dir("smoke_version_concurrency");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Two PUTs to same key — one should win
@@ -118,7 +118,7 @@ fn smoke_version_concurrency() {
 #[test]
 fn smoke_version_monotonicity() {
     let tmp = support::test_dir("smoke_version_mono");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Monotonicity is per-object: write to same key repeatedly
@@ -137,7 +137,7 @@ fn smoke_version_monotonicity() {
 #[test]
 fn smoke_delete() {
     let tmp = support::test_dir("smoke_delete");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     rt().block_on(storage.put("key", b"data")).unwrap();
@@ -154,7 +154,7 @@ fn smoke_delete() {
 #[test]
 fn smoke_delete_nonexistent() {
     let tmp = support::test_dir("smoke_delete_missing");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     let result = storage.delete("nonexistent");
@@ -168,7 +168,7 @@ fn smoke_delete_nonexistent() {
 #[test]
 fn smoke_list_basic() {
     let tmp = support::test_dir("smoke_list_basic");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     rt().block_on(storage.put("obj-a", b"data-a")).unwrap();
@@ -189,7 +189,7 @@ fn smoke_list_basic() {
 #[test]
 fn smoke_list_prefix_filter() {
     let tmp = support::test_dir("smoke_list_prefix");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     rt().block_on(storage.put("alpha-1", b"data")).unwrap();
@@ -203,7 +203,7 @@ fn smoke_list_prefix_filter() {
 #[test]
 fn smoke_list_limit() {
     let tmp = support::test_dir("smoke_list_limit");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     for i in 0..10 {
@@ -222,7 +222,7 @@ fn smoke_list_limit() {
 #[test]
 fn smoke_large_object() {
     let tmp = support::test_dir("smoke_large_obj");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Data larger than chunk size (1 KiB) to trigger multiple chunks
@@ -235,7 +235,7 @@ fn smoke_large_object() {
 #[test]
 fn smoke_exact_chunk_boundary() {
     let tmp = support::test_dir("smoke_chunk_boundary");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Exactly one chunk size
@@ -248,7 +248,7 @@ fn smoke_exact_chunk_boundary() {
 #[test]
 fn smoke_just_over_chunk_boundary() {
     let tmp = support::test_dir("smoke_over_boundary");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Just over one chunk — triggers two chunks
@@ -265,7 +265,7 @@ fn smoke_just_over_chunk_boundary() {
 #[test]
 fn smoke_meta_disk_count() {
     let tmp = support::test_dir("smoke_meta_count");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // With M=1: total_shards = 3, so 3 metadata disks
@@ -277,7 +277,7 @@ fn smoke_meta_disk_count() {
 #[test]
 fn smoke_meta_persist() {
     let tmp = support::test_dir("smoke_persist");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     rt().block_on(storage.put("persist-key", b"persist-data"))
@@ -294,7 +294,7 @@ fn smoke_meta_persist() {
 #[test]
 fn smoke_gc_removes_unreferenced() {
     let tmp = support::test_dir("smoke_gc");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write, delete, then GC
@@ -314,7 +314,7 @@ fn smoke_gc_removes_unreferenced() {
 #[test]
 fn smoke_startup_recovery() {
     let tmp = support::test_dir("smoke_recovery");
-    let config = support::make_test_config(&tmp, 1, 1024, 0);
+    let config = support::make_test_config(&tmp, 1, 0);
 
     // Write and commit an object
     {

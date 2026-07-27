@@ -34,8 +34,8 @@ pub enum StorageError {
     #[error("KV store error: {0}")]
     KvError(String),
 
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    #[error("IO error")]
+    IoError(String),
 
     #[error("fjall error: {0}")]
     FjallError(String),
@@ -60,6 +60,48 @@ pub enum StorageError {
     DiskIdNotFound { disk_index: usize },
 }
 
+impl Clone for StorageError {
+    fn clone(&self) -> Self {
+        use StorageError::*;
+        match self {
+            NotFound(s) => NotFound(s.clone()),
+            BucketAlreadyExists(s) => BucketAlreadyExists(s.clone()),
+            BucketNotFound(s) => BucketNotFound(s.clone()),
+            VersionNotFound { key, version } => VersionNotFound {
+                key: key.clone(),
+                version: *version,
+            },
+            VersionConflict => VersionConflict,
+            DiskFailed(s) => DiskFailed(s.clone()),
+            TooManyFailures => TooManyFailures,
+            Transient(s) => Transient(s.clone()),
+            ErasureCoding(s) => ErasureCoding(s.clone()),
+            ChecksumMismatch { expected, actual } => ChecksumMismatch {
+                expected: *expected,
+                actual: *actual,
+            },
+            KvError(s) => KvError(s.clone()),
+            IoError(s) => IoError(s.clone()),
+            FjallError(s) => FjallError(s.clone()),
+            ReedSolomonError(s) => ReedSolomonError(s.clone()),
+            NoHealthyDisks => NoHealthyDisks,
+            ReplicationFailed(s) => ReplicationFailed(s.clone()),
+            ClusterIdMismatch {
+                disk_index,
+                expected,
+                actual,
+            } => ClusterIdMismatch {
+                disk_index: *disk_index,
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
+            DiskIdNotFound { disk_index } => DiskIdNotFound {
+                disk_index: *disk_index,
+            },
+        }
+    }
+}
+
 /// Result type for storage operations.
 pub type StorageResult<T> = Result<T, StorageError>;
 
@@ -72,5 +114,11 @@ impl From<fjall::Error> for StorageError {
 impl From<reed_solomon_simd::Error> for StorageError {
     fn from(e: reed_solomon_simd::Error) -> Self {
         StorageError::ReedSolomonError(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(e: std::io::Error) -> Self {
+        StorageError::IoError(e.to_string())
     }
 }

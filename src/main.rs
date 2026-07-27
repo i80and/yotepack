@@ -18,10 +18,6 @@ struct Cli {
     #[arg(short, long, default_value = "1")]
     failures: u32,
 
-    /// Chunk size in bytes (default: 67108864 = 64 MiB)
-    #[arg(long, default_value_t = 64 * 1024 * 1024)]
-    chunk_size: usize,
-
     /// Port to listen on (for future HTTP server)
     #[arg(short, long, default_value_t = 8080)]
     port: u16,
@@ -52,16 +48,14 @@ async fn main() {
     let config = Config {
         disk_paths: cli.disk,
         disk_failures: cli.failures,
-        chunk_size: cli.chunk_size,
         metadata_replicas: 0, // 0 = all disks
         disk_uuids: Vec::new(),
     };
 
     tracing::info!(
-        "Starting erasure-coded storage server with config: M={}, shards={}, chunks={}",
+        "Starting erasure-coded storage server with config: M={}, shards={}",
         config.disk_failures,
-        config.total_shards(),
-        config.chunk_size
+        config.total_shards()
     );
 
     // Create storage instance
@@ -117,7 +111,6 @@ mod tests {
         Config {
             disk_paths,
             disk_failures: 1,
-            chunk_size: 1024,     // 1 KiB for fast tests
             metadata_replicas: 0, // 0 = all disks
             disk_uuids: Vec::new(),
         }

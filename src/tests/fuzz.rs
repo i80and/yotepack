@@ -52,7 +52,7 @@ fn any_key() -> impl Strategy<Value = String> {
 fn prop_read_after_write() {
     proptest!(|(data in any_data())| {
         let tmp = support::test_dir("fuzz_rainw");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         let key = "rainw-key";
@@ -68,7 +68,7 @@ fn prop_read_after_write() {
 fn prop_read_after_write_many_keys() {
     proptest!(|(keys in proptest::collection::vec(any_key(), 1..20))| {
         let tmp = support::test_dir("fuzz_rainw_many");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         let tokens: Vec<u64> = keys
@@ -97,7 +97,7 @@ fn prop_read_after_write_many_keys() {
 fn prop_version_monotonicity() {
     proptest!(|(count in 1usize..50usize)| {
         let tmp = support::test_dir("fuzz_monotonicity");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         // Monotonicity is per-object: write to same key repeatedly
@@ -122,7 +122,7 @@ fn prop_version_monotonicity() {
 fn prop_no_ghost_data() {
     proptest!(|(count in 1usize..30usize)| {
         let tmp = support::test_dir("fuzz_no_ghost");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         // Write some objects
@@ -161,7 +161,7 @@ fn prop_no_ghost_data() {
 fn prop_checksum_consistency() {
     proptest!(|(count in 1usize..20usize)| {
         let tmp = support::test_dir("fuzz_checksum");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         for i in 0..count {
@@ -195,7 +195,7 @@ fn prop_checksum_consistency() {
 fn prop_no_ghost_data_after_gc() {
     proptest!(|(count in 5usize..20usize)| {
         let tmp = support::test_dir("fuzz_gc_ghost");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         // Write and delete objects
@@ -238,7 +238,7 @@ fn prop_no_ghost_data_after_gc() {
 fn prop_version_conflict_resolved() {
     proptest!(|(count in 1usize..30usize)| {
         let tmp = support::test_dir("fuzz_conflict");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         // Write N versions to the same key (simulates competing writers)
@@ -283,7 +283,7 @@ fn prop_version_conflict_resolved() {
 fn prop_list_consistency() {
     proptest!(|(count in 1usize..30usize)| {
         let tmp = support::test_dir("fuzz_list");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         // Track object keys and their tokens
@@ -322,7 +322,7 @@ fn prop_list_consistency() {
 fn prop_read_your_writes_multiple_versions() {
     proptest!(|(versions in 1usize..20usize)| {
         let tmp = support::test_dir("fuzz_rainw_multi");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         let mut tokens: Vec<u64> = Vec::new();
@@ -353,7 +353,7 @@ fn prop_read_your_writes_multiple_versions() {
 fn prop_read_after_write_multi_chunk() {
     proptest!(|(size in 2048..8192)| {
         let tmp = support::test_dir("fuzz_rainw_multichunk");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
@@ -377,7 +377,7 @@ fn prop_read_after_write_multi_chunk() {
 fn prop_crud_lifecycle() {
     proptest!(|(count in 5usize..30usize)| {
         let tmp = support::test_dir("fuzz_crud");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         // Track object keys and their tokens
@@ -475,7 +475,7 @@ fn any_op() -> impl Strategy<Value = FuzzOp> {
 fn prop_random_operation_sequence() {
     proptest!(|(ops in proptest::collection::vec(any_op(), 1..50))| {
         let tmp = support::test_dir("fuzz_ops");
-        let config = support::make_test_config(&tmp, 1, 1024, 0);
+        let config = support::make_test_config(&tmp, 1, 0);
         let storage = ObjectStorage::new(config).unwrap();
 
         for op in ops {

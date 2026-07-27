@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::disk::{ChunkStore, VersionMeta, VersionStatus};
 use crate::errors::{StorageError, StorageResult};
 
-const CHUNK_SIZE_DEFAULT: usize = 64 * 1024 * 1024;
+pub(crate) const CHUNK_SIZE_DEFAULT: usize = 64 * 1024 * 1024;
 
 /// The main object storage service.
 pub struct ObjectStorage {
@@ -73,22 +73,28 @@ impl ObjectStorage {
         let expected_cksum = meta.checksum;
         let total_chunks = meta.chunk_checksums.len();
         let data_size = meta.data_size;
-        let chunk_size = self.config.chunk_size as u32;
+        let chunk_size = CHUNK_SIZE_DEFAULT as u32;
         let mut all_data: Vec<u8> = Vec::with_capacity(data_size);
 
         // Step 3-4: Read and decode each chunk from mega-files
         for (chunk_idx, &expected_chunk_cksum) in meta.chunk_checksums.iter().enumerate() {
             // Calculate expected (unpadded) chunk size
             let expected_chunk_size = if chunk_idx == total_chunks - 1 {
-                data_size - (chunk_idx * self.config.chunk_size)
+                data_size - (chunk_idx * CHUNK_SIZE_DEFAULT)
             } else {
-                self.config.chunk_size
+                CHUNK_SIZE_DEFAULT
             };
+
+            // Compute entry size: 16 (cksum) + 8 (len) + shard_size
+            let k = self.chunk_store.k;
+            let shard_size = (expected_chunk_size + k - 1) / k;
+            let shard_size = shard_size.div_ceil(2) * 2; // even
+            let entry_size = 24 + shard_size;
 
             // Read all N shards for this chunk from mega-files
             let shard_results = self
                 .chunk_store
-                .read_chunk(object_key, chunk_idx, chunk_size, version);
+                .read_chunk(object_key, chunk_idx, entry_size, version);
 
             // Decode this chunk from its shards (verifies chunk checksum)
             let (chunk_data, corrections) = self.chunk_store.recover_chunk(
@@ -157,8 +163,8 @@ impl ObjectStorage {
         object_key: &str,
         reader: &mut R,
     ) -> StorageResult<u64> {
-        let chunk_size = self.config.chunk_size as u32;
-        let mut buf = vec![0u8; self.config.chunk_size];
+        let chunk_size = CHUNK_SIZE_DEFAULT as u32;
+        let mut buf = vec![0u8; CHUNK_SIZE_DEFAULT];
         let mut chunk_data_list: Vec<Vec<u8>> = Vec::new();
         let mut chunk_checksums: Vec<u128> = Vec::new();
         let mut obj_hasher = StreamingChecksum::new();
@@ -213,13 +219,22 @@ impl ObjectStorage {
             .chunk_store
             .disks
             .iter()
-            .map(|d| d.open_write(object_key, next_version, chunk_size).map(Some))
+            .map(|d| {
+                // Write actual data size of first chunk (for format detection)
+                // Use 0 as format marker for new format (variable-length entries)
+                d.open_write(object_key, next_version, chunk_size, 0)
+                    .map(Some)
+            })
             .collect::<Result<_, _>>()?;
 
-        for chunk_data in chunk_data_list {
-            let (_, _) =
-                self.chunk_store
-                    .encode_and_append(&chunk_data, chunk_size, &mut handles)?;
+        for (idx, chunk_data) in chunk_data_list.iter().enumerate() {
+            let is_last = idx == chunk_data_list.len() - 1;
+            let (_, _) = self.chunk_store.encode_and_append(
+                chunk_data,
+                chunk_size,
+                is_last,
+                &mut handles,
+            )?;
         }
 
         // Phase 5: Commit all mega-files (atomic rename)
