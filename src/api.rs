@@ -73,7 +73,6 @@ impl ObjectStorage {
         let expected_cksum = meta.checksum;
         let total_chunks = meta.chunk_checksums.len();
         let data_size = meta.data_size;
-        let chunk_size = CHUNK_SIZE_DEFAULT as u32;
         let mut all_data: Vec<u8> = Vec::with_capacity(data_size);
 
         // Step 3-4: Read and decode each chunk from mega-files
@@ -109,16 +108,13 @@ impl ObjectStorage {
 
             // Write corrections for any failed/corrupted shards
             for (disk_idx, corrected_shard) in corrections {
-                // Use chunk_ids[chunk_idx] for legacy file naming
-                if let Some(chunk_id) = meta.chunk_ids.get(chunk_idx) {
-                    let shard_cksum = checksum::checksum(&corrected_shard);
-                    if let Err(e) = self.chunk_store.disks[disk_idx].write_legacy(
-                        chunk_id,
-                        &corrected_shard,
-                        shard_cksum,
-                    ) {
-                        tracing::warn!("Failed to write correction for chunk {}: {e}", chunk_id);
-                    }
+                if let Err(e) = self.chunk_store.disks[disk_idx].fix_mega_file_entry(
+                    object_key,
+                    chunk_idx,
+                    &corrected_shard,
+                    version,
+                ) {
+                    tracing::warn!("Failed to fix mega-file entry for chunk {}: {e}", chunk_idx);
                 }
             }
         }

@@ -309,6 +309,10 @@ impl Disk {
 
             let actual_cksum = checksum::checksum(&data);
             if actual_cksum != stored_cksum {
+                tracing::warn!(
+                    "Checksum mismatch on disk {}: stored={:#034x} actual={:#034x} — shard will be repaired on next write",
+                    self.path.display(), stored_cksum, actual_cksum
+                );
                 results.push(Err(StorageError::ChecksumMismatch {
                     expected: stored_cksum,
                     actual: actual_cksum,
@@ -344,6 +348,12 @@ impl Disk {
 
                 let actual_cksum = checksum::checksum(&data);
                 if actual_cksum != stored_cksum {
+                    tracing::warn!(
+                        "Checksum mismatch on disk {}: stored={:#034x} actual={:#034x}",
+                        self.path.display(),
+                        stored_cksum,
+                        actual_cksum
+                    );
                     results.push(Err(StorageError::ChecksumMismatch {
                         expected: stored_cksum,
                         actual: actual_cksum,
@@ -402,6 +412,71 @@ impl Disk {
         }
 
         Ok(data.to_vec())
+    }
+
+    /// Fix a corrupted entry in a mega-file by rewriting it.
+    /// Reads all entries, replaces the one at `chunk_idx` with `corrected_data`,
+    /// then rewrites the entire file. This repairs bitrot on-disk.
+    pub fn fix_mega_file_entry(
+        &self,
+        object_key: &str,
+        chunk_idx: usize,
+        corrected_data: &[u8],
+        version: u64,
+    ) -> StorageResult<()> {
+        if *self.is_failed.lock().unwrap() {
+            return Err(StorageError::DiskFailed(format!(
+                "disk {} is marked as failed",
+                self.path.display()
+            )));
+        }
+
+        let path = self
+            .segments_path(object_key)
+            .join(format!("v{version:08}"));
+
+        // Read all existing entries
+        let raw = std::fs::read(&path)
+            .map_err(|e| StorageError::Transient(format!("read mega-file failed: {e}")))?;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&raw[..4]); // keep format marker
+
+        let mut idx = 4;
+        let mut written = 0u64;
+        while idx < raw.len() {
+            let remaining = raw.len() - idx;
+            if remaining < 24 {
+                break; // incomplete entry
+            }
+            let len = u64::from_le_bytes(raw[idx + 16..idx + 24].try_into().unwrap()) as usize;
+            if written as usize == chunk_idx {
+                // Replace with corrected entry
+                let cksum = checksum::checksum(corrected_data);
+                out.extend_from_slice(&cksum.to_le_bytes());
+                out.extend_from_slice(&(corrected_data.len() as u64).to_le_bytes());
+                out.extend_from_slice(corrected_data);
+                tracing::info!(
+                    "Bitrot repaired: chunk {chunk_idx} on disk {} → {} bytes",
+                    self.path.display(),
+                    corrected_data.len()
+                );
+            } else {
+                // Keep original entry
+                out.extend_from_slice(&raw[idx..idx + 24 + len]);
+            }
+            idx += 24 + len;
+            written += 1;
+        }
+
+        // Write atomically via tmp + rename
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &out)
+            .map_err(|e| StorageError::Transient(format!("write correction failed: {e}")))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| StorageError::Transient(format!("rename correction failed: {e}")))?;
+
+        Ok(())
     }
 
     /// Legacy: write chunk data to per-chunk file (bitrot correction path).
