@@ -38,88 +38,33 @@ impl ObjectStorage {
         object_key: &str,
         read_after_write_token: Option<u64>,
     ) -> StorageResult<Vec<u8>> {
-        if object_key.is_empty() {
-            return Err(StorageError::NotFound(
-                "object key cannot be empty".to_string(),
-            ));
-        }
-
-        // Step 1: Determine which version to read.
-        let version = if let Some(token) = read_after_write_token {
-            token
-        } else {
-            self.meta_store.read_latest_version(object_key)?
-        };
-
-        // Step 2: Fetch version metadata.
-        let meta = if version != 0 {
-            self.meta_store
-                .read_version_by_number(object_key, version)?
-        } else {
-            self.meta_store.read_version(object_key)?
-        };
-
-        if meta.version != version || meta.status != VersionStatus::Committed {
-            return Err(StorageError::VersionNotFound {
-                key: object_key.to_string(),
-                version,
-            });
-        }
+        let version = Self::resolve_version(self, object_key, read_after_write_token)?;
+        let (meta, _) = Self::fetch_meta(self, object_key, version)?;
 
         if meta.chunk_checksums.is_empty() {
             return Ok(Vec::new());
         }
 
-        let expected_cksum = meta.checksum;
         let total_chunks = meta.chunk_checksums.len();
         let data_size = meta.data_size;
+        let expected_cksum = meta.checksum;
         let mut all_data: Vec<u8> = Vec::with_capacity(data_size);
 
-        // Step 3-4: Read and decode each chunk from mega-files
-        for (chunk_idx, &expected_chunk_cksum) in meta.chunk_checksums.iter().enumerate() {
-            // Calculate expected (unpadded) chunk size
-            let expected_chunk_size = if chunk_idx == total_chunks - 1 {
-                data_size - (chunk_idx * CHUNK_SIZE_DEFAULT)
-            } else {
-                CHUNK_SIZE_DEFAULT
-            };
+        Self::for_each_chunk(
+            self,
+            object_key,
+            version,
+            0,
+            total_chunks,
+            &meta.chunk_checksums,
+            data_size,
+            total_chunks,
+            |_chunk_idx, chunk_data, corrections| {
+                all_data.extend_from_slice(&chunk_data);
+                Self::apply_corrections(self, object_key, _chunk_idx, version, corrections);
+            },
+        )?;
 
-            // Compute entry size: 16 (cksum) + 8 (len) + shard_size
-            let k = self.chunk_store.k;
-            let shard_size = expected_chunk_size.div_ceil(k);
-            let shard_size = shard_size.div_ceil(2) * 2; // even
-            let entry_size = 24 + shard_size;
-
-            // Read all N shards for this chunk from mega-files
-            let shard_results = self
-                .chunk_store
-                .read_chunk(object_key, chunk_idx, entry_size, version);
-
-            // Decode this chunk from its shards (verifies chunk checksum)
-            let (chunk_data, corrections) = self.chunk_store.recover_chunk(
-                expected_chunk_cksum,
-                expected_chunk_size,
-                &shard_results,
-            )?;
-
-            // Trim last chunk if needed (it may have padding from erasure coding)
-            let actual_chunk_size = std::cmp::min(chunk_data.len(), expected_chunk_size);
-            all_data.extend_from_slice(&chunk_data[..actual_chunk_size]);
-
-            // Write corrections for any failed/corrupted shards
-            for (disk_idx, corrected_shard) in corrections {
-                if let Err(e) = self.chunk_store.disks[disk_idx].fix_mega_file_entry(
-                    object_key,
-                    chunk_idx,
-                    &corrected_shard,
-                    version,
-                ) {
-                    tracing::warn!("Failed to fix mega-file entry for chunk {}: {e}", chunk_idx);
-                }
-            }
-        }
-
-        // Step 5: Verify overall checksum
         let actual_cksum = checksum::checksum(&all_data);
         if actual_cksum != expected_cksum {
             return Err(StorageError::ChecksumMismatch {
@@ -129,6 +74,96 @@ impl ObjectStorage {
         }
 
         Ok(all_data)
+    }
+
+    // -------------------------------------------------------------------------
+    // get_range(object_key, start, end, token) -> (data, total_size)
+    // -------------------------------------------------------------------------
+
+    /// Read a byte range of an object. Only reads the chunks that overlap the range.
+    /// Returns (data, data_size) where data is the range content.
+    pub async fn get_range(
+        &self,
+        object_key: &str,
+        range_start: u64,
+        range_end: u64,
+        read_after_write_token: Option<u64>,
+    ) -> StorageResult<(Vec<u8>, u64)> {
+        if object_key.is_empty() {
+            return Err(StorageError::NotFound(
+                "object key cannot be empty".to_string(),
+            ));
+        }
+
+        let version = Self::resolve_version(self, object_key, read_after_write_token)?;
+        let (meta, _) = Self::fetch_meta(self, object_key, version)?;
+
+        let data_size = meta.data_size as u64;
+
+        if range_start >= data_size {
+            return Err(StorageError::InvalidRange(format!(
+                "range start {range_start} >= object size {data_size}"
+            )));
+        }
+        if range_end >= data_size {
+            return Err(StorageError::InvalidRange(format!(
+                "range end {range_end} >= object size {data_size}"
+            )));
+        }
+        if range_end < range_start {
+            return Err(StorageError::InvalidRange(format!(
+                "range end {range_end} < start {range_start}"
+            )));
+        }
+
+        if meta.chunk_checksums.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+
+        let total_chunks = meta.chunk_checksums.len();
+        let first_chunk = (range_start / CHUNK_SIZE_DEFAULT as u64) as usize;
+        let last_chunk = (range_end / CHUNK_SIZE_DEFAULT as u64) as usize;
+
+        let mut result = Vec::new();
+        let mut global_offset = 0u64;
+
+        Self::for_each_chunk(
+            self,
+            object_key,
+            version,
+            first_chunk,
+            last_chunk - first_chunk + 1,
+            &meta.chunk_checksums,
+            data_size as usize,
+            total_chunks,
+            |chunk_idx, chunk_data, corrections| {
+                let actual_chunk_size = chunk_data.len();
+                let chunk_start = global_offset;
+                let chunk_end = global_offset + actual_chunk_size as u64;
+                global_offset = chunk_end;
+
+                if chunk_end <= range_start || chunk_start > range_end {
+                    Self::apply_corrections(self, object_key, chunk_idx, version, corrections);
+                    return;
+                }
+
+                let chunk_local_start = if range_start > chunk_start {
+                    (range_start - chunk_start) as usize
+                } else {
+                    0
+                };
+                let chunk_local_end = if range_end < chunk_end {
+                    ((range_end - chunk_start) + 1) as usize
+                } else {
+                    actual_chunk_size
+                };
+
+                result.extend_from_slice(&chunk_data[chunk_local_start..chunk_local_end]);
+                Self::apply_corrections(self, object_key, chunk_idx, version, corrections);
+            },
+        )?;
+
+        Ok((result, data_size))
     }
 
     // -------------------------------------------------------------------------
@@ -606,6 +641,109 @@ impl ObjectStorage {
     /// List all buckets in this storage instance.
     pub fn list_buckets(&self) -> StorageResult<Vec<crate::disk::BucketMeta>> {
         self.meta_store.scan_buckets()
+    }
+
+    // -------------------------------------------------------------------------
+    // Shared chunk iteration helpers
+    // -------------------------------------------------------------------------
+
+    /// Resolve the version token to read (from read-after-write token or latest).
+    fn resolve_version(&self, object_key: &str, raw_token: Option<u64>) -> StorageResult<u64> {
+        Ok(match raw_token {
+            Some(token) => token,
+            None => self.meta_store.read_latest_version(object_key)?,
+        })
+    }
+
+    /// Fetch and validate version metadata.
+    fn fetch_meta(
+        &self,
+        object_key: &str,
+        version: u64,
+    ) -> StorageResult<(crate::disk::VersionMeta, u64)> {
+        let meta = if version != 0 {
+            self.meta_store
+                .read_version_by_number(object_key, version)?
+        } else {
+            self.meta_store.read_version(object_key)?
+        };
+        if meta.version != version || meta.status != crate::disk::VersionStatus::Committed {
+            return Err(StorageError::VersionNotFound {
+                key: object_key.to_string(),
+                version,
+            });
+        }
+        Ok((meta, version))
+    }
+
+    /// Apply bitrot corrections for a decoded chunk.
+    fn apply_corrections(
+        &self,
+        object_key: &str,
+        chunk_idx: usize,
+        version: u64,
+        corrections: Vec<(usize, Vec<u8>)>,
+    ) {
+        for (disk_idx, corrected_shard) in corrections {
+            if let Err(e) = self.chunk_store.disks[disk_idx].fix_mega_file_entry(
+                object_key,
+                chunk_idx,
+                &corrected_shard,
+                version,
+            ) {
+                tracing::warn!("Failed to fix mega-file entry for chunk {chunk_idx}: {e}");
+            }
+        }
+    }
+
+    /// Iterate over chunks and invoke `callback` for each decoded chunk.
+    /// `skip` and `take` limit the range of chunks (0..len for all).
+    fn for_each_chunk<F>(
+        &self,
+        object_key: &str,
+        version: u64,
+        skip: usize,
+        take: usize,
+        chunk_checksums: &[u128],
+        data_size: usize,
+        total_chunks: usize,
+        mut callback: F,
+    ) -> StorageResult<()>
+    where
+        F: FnMut(usize, Vec<u8>, Vec<(usize, Vec<u8>)>),
+    {
+        for (chunk_idx, &expected_chunk_cksum) in
+            chunk_checksums.iter().enumerate().skip(skip).take(take)
+        {
+            let expected_chunk_size = if chunk_idx == total_chunks - 1 {
+                data_size - (chunk_idx * CHUNK_SIZE_DEFAULT)
+            } else {
+                CHUNK_SIZE_DEFAULT
+            };
+
+            let k = self.chunk_store.k;
+            let shard_size = expected_chunk_size.div_ceil(k);
+            let shard_size = shard_size.div_ceil(2) * 2;
+            let entry_size = 24 + shard_size;
+
+            let shard_results = self
+                .chunk_store
+                .read_chunk(object_key, chunk_idx, entry_size, version);
+
+            let (mut chunk_data, corrections) = self.chunk_store.recover_chunk(
+                expected_chunk_cksum,
+                expected_chunk_size,
+                &shard_results,
+            )?;
+
+            // Trim last chunk if it has padding from erasure coding
+            if chunk_idx == total_chunks - 1 && chunk_data.len() > expected_chunk_size {
+                chunk_data.truncate(expected_chunk_size);
+            }
+
+            callback(chunk_idx, chunk_data, corrections);
+        }
+        Ok(())
     }
 }
 

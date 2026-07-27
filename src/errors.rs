@@ -4,6 +4,9 @@ pub enum StorageError {
     #[error("object not found: {0}")]
     NotFound(String),
 
+    #[error("invalid byte range: {0}")]
+    InvalidRange(String),
+
     #[error("bucket already exists: {0}")]
     BucketAlreadyExists(String),
 
@@ -65,6 +68,7 @@ impl Clone for StorageError {
         use StorageError::*;
         match self {
             NotFound(s) => NotFound(s.clone()),
+            InvalidRange(s) => InvalidRange(s.clone()),
             BucketAlreadyExists(s) => BucketAlreadyExists(s.clone()),
             BucketNotFound(s) => BucketNotFound(s.clone()),
             VersionNotFound { key, version } => VersionNotFound {

@@ -714,6 +714,7 @@ async fn put_object(
 async fn get_object(
     State(state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     // Validate bucket name
     if bucket.is_empty() || bucket.contains('/') || bucket.contains(':') {
@@ -725,7 +726,85 @@ async fn get_object(
     // Build full object key
     let object_key = format!("{bucket}/{key}");
 
-    // Retrieve the object
+    // Check for Range header
+    if let Some(range_header) = headers.get("range") {
+        let range_str = match range_header.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                return error_to_response(StorageError::InvalidRange(
+                    "invalid Range header encoding".to_string(),
+                ))
+            }
+        };
+
+        // Parse "bytes=start-end"
+        if !range_str.starts_with("bytes=") {
+            return error_to_response(StorageError::InvalidRange(format!(
+                "unsupported range format: {range_str}"
+            )));
+        }
+
+        let range_body = &range_str[6..];
+        let parts: Vec<&str> = range_body.splitn(2, '-').collect();
+        if parts.len() != 2 {
+            return error_to_response(StorageError::InvalidRange(format!(
+                "malformed range: {range_str}"
+            )));
+        }
+
+        let start: u64 = match parts[0].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = format!("invalid range start: {}", parts[0]);
+                return error_to_response(StorageError::InvalidRange(msg));
+            }
+        };
+        let end: u64 = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = format!("invalid range end: {}", parts[1]);
+                return error_to_response(StorageError::InvalidRange(msg));
+            }
+        };
+
+        // Read byte range
+        match state.storage.get_range(&object_key, start, end, None).await {
+            Ok((data, total_size)) => {
+                let content_length = data.len();
+                let mut hasher = Md5::new();
+                hasher.update(&data);
+                let etag = format!("{:x}", hasher.finalize());
+
+                let mut headers_map = HeaderMap::new();
+                headers_map.insert(
+                    "content-length",
+                    content_length.to_string().parse().unwrap(),
+                );
+                headers_map.insert(
+                    "content-range",
+                    format!("bytes {start}-{end}/{total_size}").parse().unwrap(),
+                );
+                headers_map.insert("accept-ranges", "bytes".parse().unwrap());
+                headers_map.insert("etag", etag.parse().unwrap());
+                headers_map.insert(
+                    "last-modified",
+                    Utc::now()
+                        .format("%a, %d %b %Y %H:%M:%S GMT")
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                );
+
+                let mut res = Response::new(axum::body::Body::from(data));
+                *res.status_mut() = StatusCode::PARTIAL_CONTENT;
+                *res.headers_mut() = headers_map;
+                return res;
+            }
+            Err(e) => return error_to_response(e),
+        }
+    }
+
+    // Full object read (no range)
     let data = match state.storage.get(&object_key, None).await {
         Ok(d) => d,
         Err(e) => return error_to_response(e),
@@ -736,10 +815,11 @@ async fn get_object(
     hasher.update(&data);
     let etag = format!("\"{:x}\"", hasher.finalize());
 
-    let mut headers = HeaderMap::new();
-    headers.insert("content-length", data.len().to_string().parse().unwrap());
-    headers.insert("etag", etag.parse().unwrap());
-    headers.insert(
+    let mut headers_map = HeaderMap::new();
+    headers_map.insert("content-length", data.len().to_string().parse().unwrap());
+    headers_map.insert("etag", etag.parse().unwrap());
+    headers_map.insert("accept-ranges", "bytes".parse().unwrap());
+    headers_map.insert(
         "last-modified",
         Utc::now()
             .format("%a, %d %b %Y %H:%M:%S GMT")
@@ -749,7 +829,7 @@ async fn get_object(
     );
 
     let mut res = Response::new(axum::body::Body::from(data));
-    *res.headers_mut() = headers;
+    *res.headers_mut() = headers_map;
     res
 }
 

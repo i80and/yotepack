@@ -396,6 +396,72 @@ fn prop_read_after_write_multi_chunk() {
 }
 
 // ---------------------------------------------------------------------------
+// Invariant 9: Byte range requests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prop_byte_range_requests() {
+    use crate::api::CHUNK_SIZE_DEFAULT;
+
+    proptest!(|(size in 1024usize..65536usize)| {
+        let tmp = support::test_dir("fuzz_byterange");
+        let config = support::make_test_config(&tmp, 1, 0);
+        let storage = ObjectStorage::new(config).unwrap();
+
+        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        rt().block_on(storage.put("range-key", &data)).unwrap();
+        let data_size = data.len();
+
+        // Test ranges: full, middle, start, end, cross-chunk boundary
+        let chunk_boundary = CHUNK_SIZE_DEFAULT;
+
+        // Full range
+        let (range_data, total) = rt().block_on(
+            storage.get_range("range-key", 0, (data_size - 1) as u64, None)
+        ).unwrap();
+        assert_eq!(total, data_size as u64);
+        assert_eq!(range_data, data);
+
+        // Middle range (single chunk)
+        if data_size > 256 {
+            let mid = 100;
+            let len = 50;
+            let (range_data, total) = rt().block_on(
+                storage.get_range("range-key", mid as u64, (mid + len - 1) as u64, None)
+            ).unwrap();
+            assert_eq!(total, data_size as u64);
+            assert_eq!(range_data, data[mid..mid + len]);
+        }
+
+        // Cross-chunk boundary range
+        if data_size > chunk_boundary * 2 {
+            let start = chunk_boundary - 10;
+            let end = chunk_boundary + 10;
+            let (range_data, total) = rt().block_on(
+                storage.get_range("range-key", start as u64, end as u64, None)
+            ).unwrap();
+            assert_eq!(total, data_size as u64);
+            assert_eq!(range_data, data[start..=end]);
+        }
+
+        // Start of object
+        let (range_data, total) = rt().block_on(
+            storage.get_range("range-key", 0, 99u64, None)
+        ).unwrap();
+        assert_eq!(total, data_size as u64);
+        assert_eq!(range_data, &data[0..100]);
+
+        // End of object
+        let end_start = data_size - 50;
+        let (range_data, total) = rt().block_on(
+            storage.get_range("range-key", end_start as u64, (data_size - 1) as u64, None)
+        ).unwrap();
+        assert_eq!(total, data_size as u64);
+        assert_eq!(range_data, &data[end_start..]);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Invariant 10: CRUD lifecycle
 // ---------------------------------------------------------------------------
 
