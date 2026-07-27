@@ -59,6 +59,19 @@ use crate::disk::{VersionMeta, VersionStatus};
 use crate::errors::StorageError;
 
 // =============================================================================
+// Type Aliases
+// =============================================================================
+
+/// A single object entry in a list response.
+#[derive(Debug, Clone)]
+struct ContentEntry {
+    key: String,
+    last_modified: String,
+    etag: String,
+    size: usize,
+}
+
+// =============================================================================
 // Request/Response Types (placeholders for future implementation)
 // =============================================================================
 
@@ -145,17 +158,20 @@ fn list_buckets_xml(buckets: &[BucketMeta]) -> String {
     String::from_utf8(w.into_inner().into_inner()).unwrap()
 }
 
-/// ListObjects XML response.
-fn list_objects_xml(
-    bucket_name: &str,
-    prefix: &Option<String>,
-    marker: &Option<String>,
+/// Parameters for `list_objects_xml` serialization.
+struct ListXmlParams<'a> {
+    bucket_name: &'a str,
+    prefix: &'a Option<String>,
+    marker: &'a Option<String>,
     max_keys: usize,
     is_truncated: bool,
-    next_marker: &Option<String>,
-    contents: &[(String, String, String, usize)],
-    common_prefixes: &[String],
-) -> String {
+    next_marker: &'a Option<String>,
+    contents: &'a [ContentEntry],
+    common_prefixes: &'a [String],
+}
+
+/// ListObjects XML response.
+fn list_objects_xml(params: &ListXmlParams) -> String {
     let mut w = xml_writer();
     w.write_event(Event::Start(
         quick_xml::events::BytesStart::new("ListBucketResult").with_attributes([("xmlns", S3_NS)]),
@@ -163,12 +179,14 @@ fn list_objects_xml(
     .unwrap();
     w.write_event(Event::Start(quick_xml::events::BytesStart::new("Name")))
         .unwrap();
-    w.write_event(Event::Text(quick_xml::events::BytesText::new(bucket_name)))
-        .unwrap();
+    w.write_event(Event::Text(quick_xml::events::BytesText::new(
+        params.bucket_name,
+    )))
+    .unwrap();
     w.write_event(Event::End(quick_xml::events::BytesEnd::new("Name")))
         .unwrap();
 
-    if let Some(p) = prefix {
+    if let Some(p) = params.prefix {
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Prefix")))
             .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new(p)))
@@ -176,7 +194,7 @@ fn list_objects_xml(
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Prefix")))
             .unwrap();
     }
-    if let Some(m) = marker {
+    if let Some(m) = params.marker {
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Marker")))
             .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new(m)))
@@ -187,7 +205,7 @@ fn list_objects_xml(
     w.write_event(Event::Start(quick_xml::events::BytesStart::new("MaxKeys")))
         .unwrap();
     w.write_event(Event::Text(quick_xml::events::BytesText::new(
-        &max_keys.to_string(),
+        &params.max_keys.to_string(),
     )))
     .unwrap();
     w.write_event(Event::End(quick_xml::events::BytesEnd::new("MaxKeys")))
@@ -197,12 +215,12 @@ fn list_objects_xml(
     )))
     .unwrap();
     w.write_event(Event::Text(quick_xml::events::BytesText::new(
-        &is_truncated.to_string(),
+        &params.is_truncated.to_string(),
     )))
     .unwrap();
     w.write_event(Event::End(quick_xml::events::BytesEnd::new("IsTruncated")))
         .unwrap();
-    if let Some(nm) = next_marker {
+    if let Some(nm) = params.next_marker {
         w.write_event(Event::Start(quick_xml::events::BytesStart::new(
             "NextMarker",
         )))
@@ -213,12 +231,12 @@ fn list_objects_xml(
             .unwrap();
     }
 
-    for (key, last_modified, etag, size) in contents {
+    for entry in params.contents {
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Contents")))
             .unwrap();
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Key")))
             .unwrap();
-        w.write_event(Event::Text(quick_xml::events::BytesText::new(key)))
+        w.write_event(Event::Text(quick_xml::events::BytesText::new(&entry.key)))
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Key")))
             .unwrap();
@@ -227,21 +245,21 @@ fn list_objects_xml(
         )))
         .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new(
-            last_modified,
+            &entry.last_modified,
         )))
         .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("LastModified")))
             .unwrap();
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("ETag")))
             .unwrap();
-        w.write_event(Event::Text(quick_xml::events::BytesText::new(etag)))
+        w.write_event(Event::Text(quick_xml::events::BytesText::new(&entry.etag)))
             .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("ETag")))
             .unwrap();
         w.write_event(Event::Start(quick_xml::events::BytesStart::new("Size")))
             .unwrap();
         w.write_event(Event::Text(quick_xml::events::BytesText::new(
-            &size.to_string(),
+            &entry.size.to_string(),
         )))
         .unwrap();
         w.write_event(Event::End(quick_xml::events::BytesEnd::new("Size")))
@@ -258,7 +276,7 @@ fn list_objects_xml(
             .unwrap();
     }
 
-    for cp in common_prefixes {
+    for cp in params.common_prefixes {
         w.write_event(Event::Start(quick_xml::events::BytesStart::new(
             "CommonPrefixes",
         )))
@@ -592,69 +610,67 @@ async fn list_objects(
     };
 
     // Build response
-    let (contents, common_prefixes): (Vec<(String, String, String, usize)>, Vec<String>) =
-        if delimiter.is_empty() {
-            let contents: Vec<(String, String, String, usize)> = sorted
-                .into_iter()
-                .map(|(key, meta)| {
-                    // Strip bucket prefix from key: "bucket/key" -> "key"
-                    let display_key = key
-                        .strip_prefix(&format!("{bucket}/"))
-                        .unwrap_or(&key)
-                        .to_string();
-                    (
-                        display_key,
-                        Utc::now().to_rfc3339(),
-                        format!("\"{:x}\"", meta.checksum),
-                        meta.data_size,
-                    )
-                })
-                .collect();
-            (contents, Vec::new())
-        } else {
-            // Group by common prefix using delimiter
-            let mut groups: std::collections::BTreeMap<String, ()> =
-                std::collections::BTreeMap::new();
-            let mut contents: Vec<(String, String, String, usize)> = Vec::new();
-
-            for (key, meta) in sorted {
-                // key is "bucket/key", compute relative display key
+    let (contents, common_prefixes): (Vec<ContentEntry>, Vec<String>) = if delimiter.is_empty() {
+        let contents: Vec<ContentEntry> = sorted
+            .into_iter()
+            .map(|(key, meta)| {
+                // Strip bucket prefix from key: "bucket/key" -> "key"
                 let display_key = key
                     .strip_prefix(&format!("{bucket}/"))
                     .unwrap_or(&key)
                     .to_string();
-                // The suffix is everything after the user-provided prefix
-                let suffix = display_key.strip_prefix(prefix).unwrap_or(&display_key);
-
-                if let Some(pos) = suffix.find(delimiter) {
-                    // There's a delimiter in the suffix — this contributes to common prefixes
-                    let common = format!("{prefix}{}", &suffix[..=pos]);
-                    groups.insert(common, ());
-                } else {
-                    // No delimiter — this is a leaf object
-                    contents.push((
-                        display_key,
-                        Utc::now().to_rfc3339(),
-                        format!("\"{:x}\"", meta.checksum),
-                        meta.data_size,
-                    ));
+                ContentEntry {
+                    key: display_key,
+                    last_modified: Utc::now().to_rfc3339(),
+                    etag: format!("\"{:x}\"", meta.checksum),
+                    size: meta.data_size,
                 }
+            })
+            .collect();
+        (contents, Vec::new())
+    } else {
+        // Group by common prefix using delimiter
+        let mut groups: std::collections::BTreeMap<String, ()> = std::collections::BTreeMap::new();
+        let mut contents: Vec<ContentEntry> = Vec::new();
+
+        for (key, meta) in sorted {
+            // key is "bucket/key", compute relative display key
+            let display_key = key
+                .strip_prefix(&format!("{bucket}/"))
+                .unwrap_or(&key)
+                .to_string();
+            // The suffix is everything after the user-provided prefix
+            let suffix = display_key.strip_prefix(prefix).unwrap_or(&display_key);
+
+            if let Some(pos) = suffix.find(delimiter) {
+                // There's a delimiter in the suffix — this contributes to common prefixes
+                let common = format!("{prefix}{}", &suffix[..=pos]);
+                groups.insert(common, ());
+            } else {
+                // No delimiter — this is a leaf object
+                contents.push(ContentEntry {
+                    key: display_key,
+                    last_modified: Utc::now().to_rfc3339(),
+                    etag: format!("\"{:x}\"", meta.checksum),
+                    size: meta.data_size,
+                });
             }
+        }
 
-            let common_prefixes: Vec<String> = groups.into_keys().collect();
-            (contents, common_prefixes)
-        };
+        let common_prefixes: Vec<String> = groups.into_keys().collect();
+        (contents, common_prefixes)
+    };
 
-    let body = list_objects_xml(
-        &bucket,
-        &params.prefix,
-        &params.marker,
-        params.max_keys.unwrap_or(1000) as usize,
+    let body = list_objects_xml(&ListXmlParams {
+        bucket_name: &bucket,
+        prefix: &params.prefix,
+        marker: &params.marker,
+        max_keys: params.max_keys.unwrap_or(1000) as usize,
         is_truncated,
-        &next_marker,
-        &contents,
-        &common_prefixes,
-    );
+        next_marker: &next_marker,
+        contents: &contents,
+        common_prefixes: &common_prefixes,
+    });
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/xml".parse().unwrap());

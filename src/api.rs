@@ -19,6 +19,14 @@ pub struct ObjectStorage {
     pub meta_store: crate::metadata::ReplicatedMetaStore,
 }
 
+/// Context for iterating over chunk data in a mega-file.
+struct ChunkReadContext<'a> {
+    object_key: &'a str,
+    version: u64,
+    chunk_checksums: &'a [u128],
+    data_size: usize,
+}
+
 impl ObjectStorage {
     /// Create a new ObjectStorage instance.
     pub fn new(config: Config) -> StorageResult<Self> {
@@ -50,14 +58,17 @@ impl ObjectStorage {
         let expected_cksum = meta.checksum;
         let mut all_data: Vec<u8> = Vec::with_capacity(data_size);
 
-        Self::for_each_chunk(
-            self,
+        let ctx = ChunkReadContext {
             object_key,
             version,
-            0,
-            total_chunks,
-            &meta.chunk_checksums,
+            chunk_checksums: &meta.chunk_checksums,
             data_size,
+        };
+
+        Self::for_each_chunk(
+            self,
+            &ctx,
+            0,
             total_chunks,
             |_chunk_idx, chunk_data, corrections| {
                 all_data.extend_from_slice(&chunk_data);
@@ -120,22 +131,24 @@ impl ObjectStorage {
             return Ok((Vec::new(), 0));
         }
 
-        let total_chunks = meta.chunk_checksums.len();
         let first_chunk = (range_start / CHUNK_SIZE_DEFAULT as u64) as usize;
         let last_chunk = (range_end / CHUNK_SIZE_DEFAULT as u64) as usize;
+
+        let ctx = ChunkReadContext {
+            object_key,
+            version,
+            chunk_checksums: &meta.chunk_checksums,
+            data_size: data_size as usize,
+        };
 
         let mut result = Vec::new();
         let mut global_offset = 0u64;
 
         Self::for_each_chunk(
             self,
-            object_key,
-            version,
+            &ctx,
             first_chunk,
             last_chunk - first_chunk + 1,
-            &meta.chunk_checksums,
-            data_size as usize,
-            total_chunks,
             |chunk_idx, chunk_data, corrections| {
                 let actual_chunk_size = chunk_data.len();
                 let chunk_start = global_offset;
@@ -700,23 +713,20 @@ impl ObjectStorage {
     /// `skip` and `take` limit the range of chunks (0..len for all).
     fn for_each_chunk<F>(
         &self,
-        object_key: &str,
-        version: u64,
+        ctx: &ChunkReadContext,
         skip: usize,
         take: usize,
-        chunk_checksums: &[u128],
-        data_size: usize,
-        total_chunks: usize,
         mut callback: F,
     ) -> StorageResult<()>
     where
         F: FnMut(usize, Vec<u8>, Vec<(usize, Vec<u8>)>),
     {
+        let total_chunks = ctx.chunk_checksums.len();
         for (chunk_idx, &expected_chunk_cksum) in
-            chunk_checksums.iter().enumerate().skip(skip).take(take)
+            ctx.chunk_checksums.iter().enumerate().skip(skip).take(take)
         {
             let expected_chunk_size = if chunk_idx == total_chunks - 1 {
-                data_size - (chunk_idx * CHUNK_SIZE_DEFAULT)
+                ctx.data_size - (chunk_idx * CHUNK_SIZE_DEFAULT)
             } else {
                 CHUNK_SIZE_DEFAULT
             };
@@ -726,9 +736,9 @@ impl ObjectStorage {
             let shard_size = shard_size.div_ceil(2) * 2;
             let entry_size = 24 + shard_size;
 
-            let shard_results = self
-                .chunk_store
-                .read_chunk(object_key, chunk_idx, entry_size, version);
+            let shard_results =
+                self.chunk_store
+                    .read_chunk(ctx.object_key, chunk_idx, entry_size, ctx.version);
 
             let (mut chunk_data, corrections) = self.chunk_store.recover_chunk(
                 expected_chunk_cksum,
