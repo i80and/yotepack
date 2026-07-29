@@ -267,6 +267,7 @@ impl ReplicatedMetaStore {
             checksum,
             status,
             data_size,
+            last_modified: metadata.get("last-modified").cloned().unwrap_or_default(),
             metadata,
         })
     }
@@ -499,6 +500,7 @@ impl ReplicatedMetaStore {
     }
 
     /// Set a version as pending across all healthy disks.
+    /// `last_modified` is the RFC 3339 timestamp for this version.
     pub fn set_pending(
         &self,
         object_key: &str,
@@ -507,15 +509,19 @@ impl ReplicatedMetaStore {
         checksum_val: u128,
         data_size: usize,
         metadata: std::collections::HashMap<String, String>,
+        last_modified: String,
     ) -> StorageResult<()> {
         let ver_key = format!("ver:{object_key}{SEP}{version}");
+        let mut meta_map = metadata;
+        meta_map.insert("last-modified".to_string(), last_modified.clone());
         let meta = VersionMeta {
             version,
             chunk_checksums: chunk_checksums.to_vec(),
             checksum: checksum_val,
             status: VersionStatus::Pending,
             data_size,
-            metadata,
+            last_modified,
+            metadata: meta_map,
         };
 
         let ops = vec![
@@ -533,6 +539,8 @@ impl ReplicatedMetaStore {
     ///
     /// Returns ErrVersionConflict if the current value on any healthy disk
     /// doesn't match the expected pending state.
+    ///
+    /// Sets the `last_modified` timestamp to the current UTC time on promotion.
     pub fn promote_version(&self, object_key: &str, target_version: u64) -> StorageResult<()> {
         let ver_key = format!("ver:{object_key}{SEP}{target_version}");
 
@@ -544,9 +552,14 @@ impl ReplicatedMetaStore {
             return Err(StorageError::VersionConflict);
         }
 
-        // Update to committed status
+        // Update to committed status and set last_modified to now
         let mut committed_meta = meta;
         committed_meta.status = VersionStatus::Committed;
+        let now = chrono::Utc::now().to_rfc3339();
+        committed_meta.last_modified = now.clone();
+        committed_meta
+            .metadata
+            .insert("last-modified".to_string(), now);
 
         let ops = vec![(ver_key, self.serialize_meta(&committed_meta)?)];
 

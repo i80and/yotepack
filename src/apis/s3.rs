@@ -30,7 +30,6 @@ use axum::{
     routing::{delete, get, head, put},
     Router,
 };
-use chrono::Utc;
 use futures::stream::Stream;
 use md5::{Digest, Md5};
 use quick_xml::events::Event;
@@ -650,7 +649,7 @@ async fn list_objects(
                     .to_string();
                 ContentEntry {
                     key: display_key,
-                    last_modified: Utc::now().to_rfc3339(),
+                    last_modified: meta.last_modified.clone(),
                     etag: format!("\"{:x}\"", meta.checksum),
                     size: meta.data_size,
                 }
@@ -679,7 +678,7 @@ async fn list_objects(
                 // No delimiter — this is a leaf object
                 contents.push(ContentEntry {
                     key: display_key,
-                    last_modified: Utc::now().to_rfc3339(),
+                    last_modified: meta.last_modified.clone(),
                     etag: format!("\"{:x}\"", meta.checksum),
                     size: meta.data_size,
                 });
@@ -853,14 +852,15 @@ async fn get_object(
         );
         headers_map.insert("accept-ranges", "bytes".parse().unwrap());
         headers_map.insert("etag", etag.parse().unwrap());
-        headers_map.insert(
-            "last-modified",
-            Utc::now()
-                .format("%a, %d %b %Y %H:%M:%S GMT")
-                .to_string()
-                .parse()
-                .unwrap(),
-        );
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
+            headers_map.insert(
+                "last-modified",
+                dt.format("%a, %d %b %Y %H:%M:%S GMT")
+                    .to_string()
+                    .parse()
+                    .unwrap(),
+            );
+        }
 
         let body = Body::from_stream(ReceiverStream { rx });
         let mut res = Response::new(body);
@@ -899,14 +899,15 @@ async fn get_object(
     headers_map.insert("content-length", data_size.to_string().parse().unwrap());
     headers_map.insert("etag", etag.parse().unwrap());
     headers_map.insert("accept-ranges", "bytes".parse().unwrap());
-    headers_map.insert(
-        "last-modified",
-        Utc::now()
-            .format("%a, %d %b %Y %H:%M:%S GMT")
-            .to_string()
-            .parse()
-            .unwrap(),
-    );
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
+        headers_map.insert(
+            "last-modified",
+            dt.format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+    }
 
     let body = Body::from_stream(ReceiverStream { rx });
     let mut res = Response::new(body);
@@ -959,28 +960,26 @@ async fn head_object(
     // Build full object key
     let object_key = format!("{bucket}/{key}");
 
-    // Retrieve the object to get metadata
-    let data = match state.storage.get(&object_key, None).await {
-        Ok(d) => d,
+    // Retrieve the object metadata
+    let meta = match state.storage.meta_store.read_version(&object_key) {
+        Ok(m) => m,
         Err(e) => return error_to_response(e),
     };
-
-    // Calculate ETag
-    let mut hasher = Md5::new();
-    hasher.update(&data);
-    let etag = format!("\"{:x}\"", hasher.finalize());
+    let data_size = meta.data_size;
+    let etag = format!("\"{:x}\"", meta.checksum);
 
     let mut headers = HeaderMap::new();
-    headers.insert("content-length", data.len().to_string().parse().unwrap());
+    headers.insert("content-length", data_size.to_string().parse().unwrap());
     headers.insert("etag", etag.parse().unwrap());
-    headers.insert(
-        "last-modified",
-        Utc::now()
-            .format("%a, %d %b %Y %H:%M:%S GMT")
-            .to_string()
-            .parse()
-            .unwrap(),
-    );
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
+        headers.insert(
+            "last-modified",
+            dt.format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+    }
 
     // HEAD returns headers but no body
     let mut res = Response::new(axum::body::Body::empty());

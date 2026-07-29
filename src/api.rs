@@ -460,6 +460,7 @@ impl ObjectStorage {
                 object_checksum,
                 0,
                 std::collections::HashMap::new(),
+                String::new(),
             )?;
             return self
                 .meta_store
@@ -511,6 +512,7 @@ impl ObjectStorage {
             object_checksum,
             data_size,
             std::collections::HashMap::new(),
+            String::new(),
         )?;
 
         // Phase 7: Promote from pending → committed
@@ -780,6 +782,10 @@ impl ObjectStorage {
         new_meta
             .metadata
             .insert(key.to_lowercase(), value.to_string());
+        // Also update last_modified to reflect the change
+        let now = chrono::Utc::now().to_rfc3339();
+        new_meta.last_modified = now.clone();
+        new_meta.metadata.insert("last-modified".to_string(), now);
 
         // Re-serialize and write back
         let ver_key = format!("ver:{object_key}\u{1f}{latest_version}");

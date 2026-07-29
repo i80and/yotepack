@@ -52,6 +52,8 @@ pub struct VersionMeta {
     pub checksum: u128,
     pub status: VersionStatus,
     pub data_size: usize,
+    /// Time this version was committed, stored as an RFC 3339 / ISO 8601 string in UTC.
+    pub last_modified: String,
     /// Arbitrary user-defined metadata (e.g., Content-Type, ACL, custom headers).
     /// Keys are lowercase; values may be any string.
     pub metadata: std::collections::HashMap<String, String>,
