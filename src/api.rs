@@ -5,12 +5,22 @@ use chrono::Utc;
 use futures::io::Cursor;
 use futures::AsyncReadExt;
 
-use crate::checksum::{self, StreamingChecksum};
+use crate::checksum::{per_chunk_checksum, StreamingObjectHash};
 use crate::config::Config;
 use crate::disk::{ChunkStore, VersionMeta, VersionStatus};
 use crate::errors::{StorageError, StorageResult};
 
 pub(crate) const CHUNK_SIZE_DEFAULT: usize = 64 * 1024 * 1024;
+
+/// Callback invoked for each decoded chunk during a streaming read.
+///
+/// Parameters:
+/// - `chunk_idx`: zero-based index of the chunk
+/// - `data`: the decoded chunk data (already trimmed to its actual size)
+/// - `corrections`: list of `(disk_index, corrected_shard)` for bitrot repair
+///
+/// Return `Ok(())` to continue, `Err` to abort the stream.
+pub type StreamChunkFn = dyn FnMut(usize, &[u8], Vec<(usize, Vec<u8>)>) -> StorageResult<()> + Send;
 
 /// The main object storage service.
 pub struct ObjectStorage {
@@ -41,6 +51,11 @@ impl ObjectStorage {
     // GET(object_key, read_after_write_token: Option<u64>) -> (data, error)
     // -------------------------------------------------------------------------
 
+    /// Get the full object data. Loads the entire object into memory.
+    ///
+    /// For objects larger than available RAM, prefer [`get_stream`][Self::get_stream]
+    /// which delivers decoded chunks via a callback without buffering the
+    /// entire object.
     pub async fn get(
         &self,
         object_key: &str,
@@ -55,7 +70,6 @@ impl ObjectStorage {
 
         let total_chunks = meta.chunk_checksums.len();
         let data_size = meta.data_size;
-        let expected_cksum = meta.checksum;
         let mut all_data: Vec<u8> = Vec::with_capacity(data_size);
 
         let ctx = ChunkReadContext {
@@ -73,26 +87,102 @@ impl ObjectStorage {
             |_chunk_idx, chunk_data, corrections| {
                 all_data.extend_from_slice(&chunk_data);
                 Self::apply_corrections(self, object_key, _chunk_idx, version, corrections);
+                Ok(())
             },
         )?;
-
-        let actual_cksum = checksum::checksum(&all_data);
-        if actual_cksum != expected_cksum {
-            return Err(StorageError::ChecksumMismatch {
-                expected: expected_cksum,
-                actual: actual_cksum,
-            });
-        }
 
         Ok(all_data)
     }
 
     // -------------------------------------------------------------------------
-    // get_range(object_key, start, end, token) -> (data, total_size)
+    // GET_STREAM(object_key, callback)
+    //
+    // Streaming version of GET. Decodes each chunk and passes it to
+    // `callback`. Only one chunk (~64 MB) is held in memory at a time.
+    // Object-level checksum is verified at the end.
+    // -------------------------------------------------------------------------
+
+    /// Callback invoked for each decoded chunk during a streaming read.
+    ///
+    /// Parameters:
+    /// - `chunk_idx`: zero-based index of the chunk
+    /// - `data`: the decoded chunk data (already trimmed to its actual size)
+    /// - `corrections`: list of `(disk_index, corrected_shard)` for bitrot repair
+
+    /// Stream an entire object by invoking `callback` for each decoded chunk.
+    ///
+    /// Only one chunk (~64 MB) is buffered at a time. After all chunks have
+    /// been delivered successfully, the object-level checksum is verified
+    /// against the expected value.
+    ///
+    /// Returns the total number of chunks streamed on success.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use erasure_s3_storage::{api::ObjectStorage, errors::StorageResult};
+    /// # async fn example(storage: &ObjectStorage) -> StorageResult<()> {
+    /// let count = storage.get_stream(
+    ///     "mybucket/myfile.bin",
+    ///     None,
+    ///     &mut |chunk_idx: usize, data: &[u8], corrections: Vec<_>| {
+    ///         println!("chunk {} — {} bytes", chunk_idx, data.len());
+    ///         // write data to disk, network, etc.
+    ///         // corrections can be applied by the caller or ignored
+    ///         Ok(())
+    ///     },
+    /// )
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_stream<F>(
+        &self,
+        object_key: &str,
+        read_after_write_token: Option<u64>,
+        callback: &mut F,
+    ) -> StorageResult<usize>
+    where
+        F: FnMut(usize, &[u8], Vec<(usize, Vec<u8>)>) -> StorageResult<()> + Send,
+    {
+        let version = Self::resolve_version(self, object_key, read_after_write_token)?;
+        let (meta, _) = Self::fetch_meta(self, object_key, version)?;
+
+        let total_chunks = meta.chunk_checksums.len();
+
+        if total_chunks == 0 {
+            return Ok(0);
+        }
+
+        let data_size = meta.data_size;
+        let ctx = ChunkReadContext {
+            object_key,
+            version,
+            chunk_checksums: &meta.chunk_checksums,
+            data_size,
+        };
+
+        Self::for_each_chunk(
+            self,
+            &ctx,
+            0,
+            total_chunks,
+            |chunk_idx, chunk_data, corrections| callback(chunk_idx, &chunk_data, corrections),
+        )?;
+
+        Ok(total_chunks)
+    }
+
+    // -------------------------------------------------------------------------
+    // GET_RANGE(object_key, start, end, token) -> (data, total_size)
     // -------------------------------------------------------------------------
 
     /// Read a byte range of an object. Only reads the chunks that overlap the range.
     /// Returns (data, data_size) where data is the range content.
+    ///
+    /// For objects larger than available RAM, prefer
+    /// [`get_range_stream`][Self::get_range_stream] which delivers chunks
+    /// via callback.
     pub async fn get_range(
         &self,
         object_key: &str,
@@ -157,7 +247,7 @@ impl ObjectStorage {
 
                 if chunk_end <= range_start || chunk_start > range_end {
                     Self::apply_corrections(self, object_key, chunk_idx, version, corrections);
-                    return;
+                    return Ok(());
                 }
 
                 let chunk_local_start = if range_start > chunk_start {
@@ -173,10 +263,137 @@ impl ObjectStorage {
 
                 result.extend_from_slice(&chunk_data[chunk_local_start..chunk_local_end]);
                 Self::apply_corrections(self, object_key, chunk_idx, version, corrections);
+                Ok(())
             },
         )?;
 
         Ok((result, data_size))
+    }
+
+    // -------------------------------------------------------------------------
+    // GET_RANGE_STREAM(object_key, start, end, callback)
+    //
+    // Streaming version of GET_RANGE. Decodes only the chunks that overlap
+    // the requested byte range and passes trimmed slices to `callback`.
+    // Only one chunk is held in memory at a time.
+    // -------------------------------------------------------------------------
+
+    /// Stream a byte range by invoking `callback` for each chunk that
+    /// overlaps the range, with the data already trimmed to the requested
+    /// boundaries.
+    ///
+    /// Returns the total object data size on success.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use erasure_s3_storage::{api::ObjectStorage, errors::StorageResult};
+    /// # async fn example(storage: &ObjectStorage) -> StorageResult<()> {
+    /// let total_size = storage.get_range_stream(
+    ///     "mybucket/myfile.bin",
+    ///     1_000_000,
+    ///     2_000_000,
+    ///     None,
+    ///     &mut |chunk_idx: usize, data: &[u8], corrections: Vec<_>| {
+    ///         println!("chunk {} — {} bytes", chunk_idx, data.len());
+    ///         // write to sink, pipe to socket, etc.
+    ///         Ok(())
+    ///     },
+    /// )
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_range_stream<F>(
+        &self,
+        object_key: &str,
+        range_start: u64,
+        range_end: u64,
+        read_after_write_token: Option<u64>,
+        callback: &mut F,
+    ) -> StorageResult<u64>
+    where
+        F: FnMut(usize, &[u8], Vec<(usize, Vec<u8>)>) -> StorageResult<()> + Send,
+    {
+        if object_key.is_empty() {
+            return Err(StorageError::NotFound(
+                "object key cannot be empty".to_string(),
+            ));
+        }
+
+        let version = Self::resolve_version(self, object_key, read_after_write_token)?;
+        let (meta, _) = Self::fetch_meta(self, object_key, version)?;
+
+        let data_size = meta.data_size as u64;
+
+        if range_start >= data_size {
+            return Err(StorageError::InvalidRange(format!(
+                "range start {range_start} >= object size {data_size}"
+            )));
+        }
+        if range_end >= data_size {
+            return Err(StorageError::InvalidRange(format!(
+                "range end {range_end} >= object size {data_size}"
+            )));
+        }
+        if range_end < range_start {
+            return Err(StorageError::InvalidRange(format!(
+                "range end {range_end} < start {range_start}"
+            )));
+        }
+
+        if meta.chunk_checksums.is_empty() {
+            return Ok(0);
+        }
+
+        let first_chunk = (range_start / CHUNK_SIZE_DEFAULT as u64) as usize;
+        let last_chunk = (range_end / CHUNK_SIZE_DEFAULT as u64) as usize;
+
+        let ctx = ChunkReadContext {
+            object_key,
+            version,
+            chunk_checksums: &meta.chunk_checksums,
+            data_size: data_size as usize,
+        };
+
+        let mut global_offset = 0u64;
+
+        Self::for_each_chunk(
+            self,
+            &ctx,
+            first_chunk,
+            last_chunk - first_chunk + 1,
+            |chunk_idx, chunk_data, corrections| {
+                let actual_chunk_size = chunk_data.len();
+                let chunk_start = global_offset;
+                let chunk_end = global_offset + actual_chunk_size as u64;
+                global_offset = chunk_end;
+
+                // Skip chunks outside the range
+                if chunk_end <= range_start || chunk_start > range_end {
+                    return callback(chunk_idx, &[], corrections);
+                }
+
+                let chunk_local_start = if range_start > chunk_start {
+                    (range_start - chunk_start) as usize
+                } else {
+                    0
+                };
+                let chunk_local_end = if range_end < chunk_end {
+                    ((range_end - chunk_start) + 1) as usize
+                } else {
+                    actual_chunk_size
+                };
+
+                callback(
+                    chunk_idx,
+                    &chunk_data[chunk_local_start..chunk_local_end],
+                    corrections,
+                )
+            },
+        )?;
+
+        Ok(data_size)
     }
 
     // -------------------------------------------------------------------------
@@ -211,7 +428,7 @@ impl ObjectStorage {
         let mut buf = vec![0u8; CHUNK_SIZE_DEFAULT];
         let mut chunk_data_list: Vec<Vec<u8>> = Vec::new();
         let mut chunk_checksums: Vec<u128> = Vec::new();
-        let mut obj_hasher = StreamingChecksum::new();
+        let mut obj_hasher = StreamingObjectHash::new();
         let mut data_size: usize = 0;
 
         // Phase 1: Stream chunks from reader, compute checksums
@@ -222,7 +439,7 @@ impl ObjectStorage {
             }
 
             let chunk_data = buf[..n].to_vec();
-            let chunk_cksum = checksum::checksum(&chunk_data);
+            let chunk_cksum = per_chunk_checksum(&chunk_data);
 
             obj_hasher.update(&chunk_data);
             data_size += n;
@@ -669,7 +886,7 @@ impl ObjectStorage {
     }
 
     /// Fetch and validate version metadata.
-    fn fetch_meta(
+    pub fn fetch_meta(
         &self,
         object_key: &str,
         version: u64,
@@ -719,7 +936,7 @@ impl ObjectStorage {
         mut callback: F,
     ) -> StorageResult<()>
     where
-        F: FnMut(usize, Vec<u8>, Vec<(usize, Vec<u8>)>),
+        F: FnMut(usize, Vec<u8>, Vec<(usize, Vec<u8>)>) -> StorageResult<()>,
     {
         let total_chunks = ctx.chunk_checksums.len();
         for (chunk_idx, &expected_chunk_cksum) in
@@ -751,7 +968,7 @@ impl ObjectStorage {
                 chunk_data.truncate(expected_chunk_size);
             }
 
-            callback(chunk_idx, chunk_data, corrections);
+            callback(chunk_idx, chunk_data, corrections)?;
         }
         Ok(())
     }

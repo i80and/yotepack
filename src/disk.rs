@@ -1,5 +1,5 @@
 use crate::api::CHUNK_SIZE_DEFAULT;
-use crate::checksum;
+use crate::checksum::per_chunk_checksum;
 /// Disk management and chunk storage operations.
 use crate::config::Config;
 use crate::erasure::ErasureCoder;
@@ -306,7 +306,7 @@ impl Disk {
                 .read_exact(&mut data)
                 .map_err(|e| StorageError::Transient(format!("read data failed: {e}")))?;
 
-            let actual_cksum = checksum::checksum(&data);
+            let actual_cksum = per_chunk_checksum(&data);
             if actual_cksum != stored_cksum {
                 tracing::warn!(
                     "Checksum mismatch on disk {}: stored={:#034x} actual={:#034x} — shard will be repaired on next write",
@@ -345,7 +345,7 @@ impl Disk {
                     .read_exact(&mut data)
                     .map_err(|e| StorageError::Transient(format!("read data failed: {e}")))?;
 
-                let actual_cksum = checksum::checksum(&data);
+                let actual_cksum = per_chunk_checksum(&data);
                 if actual_cksum != stored_cksum {
                     tracing::warn!(
                         "Checksum mismatch on disk {}: stored={:#034x} actual={:#034x}",
@@ -404,7 +404,7 @@ impl Disk {
             let len = u64::from_le_bytes(raw[idx + 16..idx + 24].try_into().unwrap()) as usize;
             if written as usize == chunk_idx {
                 // Replace with corrected entry
-                let cksum = checksum::checksum(corrected_data);
+                let cksum = per_chunk_checksum(corrected_data);
                 out.extend_from_slice(&cksum.to_le_bytes());
                 out.extend_from_slice(&(corrected_data.len() as u64).to_le_bytes());
                 out.extend_from_slice(corrected_data);
@@ -503,7 +503,7 @@ impl ChunkStore {
         is_last: bool,
         handles: &mut [Option<crate::disk::WriteHandle>],
     ) -> StorageResult<(u128, Vec<u128>)> {
-        let chunk_cksum = checksum::checksum(chunk_data);
+        let chunk_cksum = per_chunk_checksum(chunk_data);
         let k = self.k;
 
         // Determine padded size: full chunks use CHUNK_SIZE_DEFAULT, last chunk
@@ -536,7 +536,7 @@ impl ChunkStore {
         let mut segment_checksums = Vec::with_capacity(self.num_disks);
         for (disk_idx, (shard_data, _disk)) in all_shards.iter().zip(self.disks.iter()).enumerate()
         {
-            let shard_cksum = checksum::checksum(shard_data);
+            let shard_cksum = per_chunk_checksum(shard_data);
             segment_checksums.push(shard_cksum);
             if let Some(ref mut handle) = handles[disk_idx] {
                 _disk.append_chunk(handle, shard_data, shard_cksum)?;
@@ -694,7 +694,7 @@ impl ChunkStore {
         };
 
         // Verify reconstructed data against expected chunk checksum
-        let actual_cksum = checksum::checksum(trimmed_data);
+        let actual_cksum = per_chunk_checksum(trimmed_data);
         if actual_cksum != expected_chunk_checksum {
             return Err(StorageError::ChecksumMismatch {
                 expected: expected_chunk_checksum,

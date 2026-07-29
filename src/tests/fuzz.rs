@@ -4,7 +4,7 @@
 //! - Read-after-write: `PUT + GET(token) == data`
 //! - Version monotonicity: `GET().version >= previous_version`
 //! - No ghost data: every chunk in scan_chunks() is referenced
-//! - Checksum consistency: `checksum(GET(key)) == meta.checksum`
+//! - Checksum consistency: `object_hash(GET(key)) == meta.checksum`
 
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -122,7 +122,7 @@ fn prop_version_monotonicity() {
 fn prop_chunk_data_consistency() {
     proptest!(|(count in 1usize..30usize)| {
         use crate::api::CHUNK_SIZE_DEFAULT;
-        use crate::checksum::checksum;
+        use crate::checksum::per_chunk_checksum;
 
         let tmp = support::test_dir("fuzz_chunk_data");
         let config = support::make_test_config(&tmp, 1, 0);
@@ -164,7 +164,7 @@ fn prop_chunk_data_consistency() {
                 let end = std::cmp::min(start + CHUNK_SIZE_DEFAULT, read_vec.len());
                 if start < read_vec.len() {
                     let chunk = &read_vec[start..end];
-                    expected_cksums.push(checksum(chunk));
+                    expected_cksums.push(per_chunk_checksum(chunk));
                 }
             }
 
@@ -206,11 +206,11 @@ fn prop_checksum_consistency() {
             let result = rt().block_on(storage.get(&format!("cksum-{i}"), Some(token))).unwrap();
             assert_eq!(result, data, "data mismatch for cksum-{i}");
 
-            // Checksum should match
-            let actual_cksum = xxhash_rust::xxh3::xxh3_128(&result);
+            // Object-level hash (ETag) should match
+            let actual_cksum = crate::checksum::object_hash(&result);
             assert_eq!(
                 meta.checksum, actual_cksum,
-                "checksum mismatch for cksum-{i}: meta={:#x}, actual={:#x}",
+                "object hash mismatch for cksum-{i}: meta={:#x}, actual={:#x}",
                 meta.checksum, actual_cksum
             );
         }

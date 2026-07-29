@@ -23,6 +23,7 @@
 //! | PutBucketVersioning | PUT       | `/:bucket`         | `put_bucket_versioning` |
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -30,10 +31,12 @@ use axum::{
     Router,
 };
 use chrono::Utc;
+use futures::stream::Stream;
 use md5::{Digest, Md5};
 use quick_xml::events::Event;
 use quick_xml::writer::Writer;
 use std::io::Cursor;
+use std::pin::Pin;
 use std::sync::Arc;
 
 // S3 XML namespace
@@ -56,7 +59,33 @@ fn parse_bucket_key(full_path: &str) -> Option<(String, String)> {
 
 use crate::api::ObjectStorage;
 use crate::disk::{VersionMeta, VersionStatus};
-use crate::errors::StorageError;
+use crate::errors::{StorageError, StorageResult};
+
+// =============================================================================
+// Streaming body: channels + futures Stream for zero-copy chunk streaming
+// =============================================================================
+
+/// A `futures::Stream` backed by a `tokio::sync::mpsc::Receiver`.
+/// Yields `Vec<u8>` chunks for streaming large objects without
+/// buffering the entire body in memory.
+struct ReceiverStream {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl Stream for ReceiverStream {
+    type Item = Result<Vec<u8>, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(data)) => std::task::Poll::Ready(Some(Ok(data))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
 
 // =============================================================================
 // Type Aliases
@@ -726,7 +755,8 @@ async fn put_object(
 
 /// GET /:bucket/:key → GetObject
 ///
-/// Retrieve an object from a bucket.
+/// Retrieve an object from a bucket. Uses streaming reads to avoid
+/// buffering large objects in memory.
 async fn get_object(
     State(state): State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -783,56 +813,90 @@ async fn get_object(
             }
         };
 
-        // Read byte range
-        match state.storage.get_range(&object_key, start, end, None).await {
-            Ok((data, total_size)) => {
-                let content_length = data.len();
-                let mut hasher = Md5::new();
-                hasher.update(&data);
-                let etag = format!("{:x}", hasher.finalize());
-
-                let mut headers_map = HeaderMap::new();
-                headers_map.insert(
-                    "content-length",
-                    content_length.to_string().parse().unwrap(),
-                );
-                headers_map.insert(
-                    "content-range",
-                    format!("bytes {start}-{end}/{total_size}").parse().unwrap(),
-                );
-                headers_map.insert("accept-ranges", "bytes".parse().unwrap());
-                headers_map.insert("etag", etag.parse().unwrap());
-                headers_map.insert(
-                    "last-modified",
-                    Utc::now()
-                        .format("%a, %d %b %Y %H:%M:%S GMT")
-                        .to_string()
-                        .parse()
-                        .unwrap(),
-                );
-
-                let mut res = Response::new(axum::body::Body::from(data));
-                *res.status_mut() = StatusCode::PARTIAL_CONTENT;
-                *res.headers_mut() = headers_map;
-                return res;
-            }
+        // Read byte range using streaming read
+        let meta = match state.storage.meta_store.read_version(&object_key) {
+            Ok(m) => m,
             Err(e) => return error_to_response(e),
-        }
+        };
+        let total_size = meta.data_size as u64;
+
+        // Spawn the streaming range read
+        let storage_arc = Arc::clone(&state.storage);
+        let object_key = object_key.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+
+        tokio::spawn(async move {
+            let mut cb =
+                |chunk_idx: usize, data: &[u8], _corrections: Vec<_>| -> StorageResult<()> {
+                    let _ = chunk_idx;
+                    // Non-blocking send — if the receiver is full, just drop the chunk
+                    let _ = tx.try_send(data.to_vec());
+                    Ok(())
+                };
+            let _ = storage_arc
+                .get_range_stream(&object_key, start, end, None, &mut cb)
+                .await;
+        });
+
+        // Build headers (content-length for range is the total requested range size)
+        let content_length = (end - start + 1) as u64;
+        let etag = format!("\"{:x}\"", meta.checksum);
+
+        let mut headers_map = HeaderMap::new();
+        headers_map.insert(
+            "content-length",
+            content_length.to_string().parse().unwrap(),
+        );
+        headers_map.insert(
+            "content-range",
+            format!("bytes {start}-{end}/{total_size}").parse().unwrap(),
+        );
+        headers_map.insert("accept-ranges", "bytes".parse().unwrap());
+        headers_map.insert("etag", etag.parse().unwrap());
+        headers_map.insert(
+            "last-modified",
+            Utc::now()
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+
+        let body = Body::from_stream(ReceiverStream { rx });
+        let mut res = Response::new(body);
+        *res.status_mut() = StatusCode::PARTIAL_CONTENT;
+        *res.headers_mut() = headers_map;
+        return res;
     }
 
-    // Full object read (no range)
-    let data = match state.storage.get(&object_key, None).await {
-        Ok(d) => d,
+    // Full object read — streaming
+    // First get metadata for headers
+    let meta = match state.storage.meta_store.read_version(&object_key) {
+        Ok(m) => m,
         Err(e) => return error_to_response(e),
     };
+    let data_size = meta.data_size as u64;
+    let etag = format!("\"{:x}\"", meta.checksum);
 
-    // Calculate ETag
-    let mut hasher = Md5::new();
-    hasher.update(&data);
-    let etag = format!("\"{:x}\"", hasher.finalize());
+    let storage_arc = Arc::clone(&state.storage);
+    let object_key_clone = object_key.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+
+    // Spawn the streaming object read
+    tokio::spawn(async move {
+        let mut cb = |chunk_idx: usize, data: &[u8], _corrections: Vec<_>| -> StorageResult<()> {
+            let _ = chunk_idx;
+            // Non-blocking send — if the receiver is full, just drop the chunk
+            let _ = tx.try_send(data.to_vec());
+            Ok(())
+        };
+        let _ = storage_arc
+            .get_stream(&object_key_clone, None, &mut cb)
+            .await;
+    });
 
     let mut headers_map = HeaderMap::new();
-    headers_map.insert("content-length", data.len().to_string().parse().unwrap());
+    headers_map.insert("content-length", data_size.to_string().parse().unwrap());
     headers_map.insert("etag", etag.parse().unwrap());
     headers_map.insert("accept-ranges", "bytes".parse().unwrap());
     headers_map.insert(
@@ -844,7 +908,8 @@ async fn get_object(
             .unwrap(),
     );
 
-    let mut res = Response::new(axum::body::Body::from(data));
+    let body = Body::from_stream(ReceiverStream { rx });
+    let mut res = Response::new(body);
     *res.headers_mut() = headers_map;
     res
 }

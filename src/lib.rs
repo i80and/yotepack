@@ -8,7 +8,7 @@ pub mod erasure;
 pub mod errors;
 pub mod metadata;
 
-pub use api::{ListEntry, ObjectStorage};
+pub use api::{ListEntry, ObjectStorage, StreamChunkFn};
 pub use config::Config;
 pub use disk::{BucketMeta, ChunkStore, Disk, VersionMeta, VersionStatus, WriteHandle};
 pub use erasure::ErasureCoder;
