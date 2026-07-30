@@ -207,13 +207,15 @@ impl ReplicatedMetaStore {
         // Metadata: length-prefixed JSON (always present in new format)
         buf.extend_from_slice(&(meta_json_len as u32).to_le_bytes());
         buf.extend_from_slice(meta_json.as_bytes());
-        // New fields: compression_level + compressed_sizes (appended at end for backward compat)
+        // New fields: compression_level, object_format, compressed_sizes
         // compression_level: 0xFF = None, otherwise level + 1 (since levels are >= 1)
         let enc_level = match meta.compression_level {
             Some(l) => (l + 1) as u8,
             None => 0xFF,
         };
         buf.push(enc_level);
+        // object_format: 0 = uncompressed, 1 = zstd compressed
+        buf.push(meta.object_format);
         // compressed_sizes: count (u32) + per-chunk sizes (u32 each)
         buf.extend_from_slice(&(meta.compressed_sizes.len() as u32).to_le_bytes());
         for &sz in &meta.compressed_sizes {
@@ -282,33 +284,40 @@ impl ReplicatedMetaStore {
             (std::collections::HashMap::new(), 0)
         };
 
-        // Parse optional new fields (backward compatible: only if extra bytes present after JSON)
+        // Parse compression_level, object_format, and compressed_sizes (always present in new format)
+        // Format: [enc_level:u8][object_format:u8][sizes_count:u32][sizes...]
+        // Minimum extra bytes: 1 + 1 + 4 = 6
         let new_fields_start = meta_checksums_end + 4 + json_len;
-        let (compression_level, compressed_sizes) = if new_fields_start + 5 <= bytes.len() {
+        let (compression_level, object_format, compressed_sizes) = if new_fields_start + 6
+            <= bytes.len()
+        {
             let enc_level = bytes[new_fields_start];
             let level = if enc_level == 0xFF {
                 None
             } else {
                 Some(enc_level as i32 - 1)
             };
+            let object_format = bytes[new_fields_start + 1];
             let sizes_count = u32::from_le_bytes(
-                bytes[new_fields_start + 1..new_fields_start + 5]
+                bytes[new_fields_start + 2..new_fields_start + 6]
                     .try_into()
                     .unwrap(),
             ) as usize;
-            let sizes_end = new_fields_start + 5 + sizes_count * 4;
+            let sizes_end = new_fields_start + 6 + sizes_count * 4;
             let sizes = if bytes.len() >= sizes_end && sizes_count > 0 {
-                bytes[new_fields_start + 5..sizes_end]
+                bytes[new_fields_start + 6..sizes_end]
                     .chunks(4)
                     .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
                     .collect()
             } else {
                 Vec::new()
             };
-            (level, sizes)
+            (level, object_format, sizes)
         } else {
-            // Old format: no new fields
-            (None, Vec::new())
+            // Greenfield: record should always have the new fields. If not, it's corrupt.
+            return Err(StorageError::KvError(
+                    "version metadata record truncated or malformed (missing compression_level/object_format/compressed_sizes)".into(),
+                ));
         };
 
         Ok(VersionMeta {
@@ -320,7 +329,7 @@ impl ReplicatedMetaStore {
             last_modified: metadata.get("last-modified").cloned().unwrap_or_default(),
             metadata,
             compression_level,
-            object_format: 0, // Old format versions had no compression
+            object_format,
             compressed_sizes,
         })
     }
