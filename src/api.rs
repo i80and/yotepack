@@ -108,7 +108,7 @@ impl ObjectStorage {
     /// - `chunk_idx`: zero-based index of the chunk
     /// - `data`: the decoded chunk data (already trimmed to its actual size)
     /// - `corrections`: list of `(disk_index, corrected_shard)` for bitrot repair
-
+    ///
     /// Stream an entire object by invoking `callback` for each decoded chunk.
     ///
     /// Only one chunk (~64 MB) is buffered at a time. After all chunks have
@@ -455,12 +455,15 @@ impl ObjectStorage {
             let next_version = self.meta_store.incr_version_counter(object_key)?;
             self.meta_store.set_pending(
                 object_key,
-                next_version,
-                &[],
-                object_checksum,
-                0,
-                std::collections::HashMap::new(),
-                String::new(),
+                VersionMeta {
+                    version: next_version,
+                    chunk_checksums: Vec::new(),
+                    checksum: object_checksum,
+                    status: VersionStatus::Pending,
+                    data_size: 0,
+                    last_modified: String::new(),
+                    metadata: std::collections::HashMap::new(),
+                },
             )?;
             return self
                 .meta_store
@@ -507,12 +510,15 @@ impl ObjectStorage {
         // Phase 6: Set pending + promote in metadata
         self.meta_store.set_pending(
             object_key,
-            next_version,
-            &chunk_checksums,
-            object_checksum,
-            data_size,
-            std::collections::HashMap::new(),
-            String::new(),
+            VersionMeta {
+                version: next_version,
+                chunk_checksums: chunk_checksums.clone(),
+                checksum: object_checksum,
+                status: VersionStatus::Pending,
+                data_size,
+                last_modified: String::new(),
+                metadata: std::collections::HashMap::new(),
+            },
         )?;
 
         // Phase 7: Promote from pending → committed

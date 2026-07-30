@@ -500,30 +500,9 @@ impl ReplicatedMetaStore {
     }
 
     /// Set a version as pending across all healthy disks.
-    /// `last_modified` is the RFC 3339 timestamp for this version.
-    pub fn set_pending(
-        &self,
-        object_key: &str,
-        version: u64,
-        chunk_checksums: &[u128],
-        checksum_val: u128,
-        data_size: usize,
-        metadata: std::collections::HashMap<String, String>,
-        last_modified: String,
-    ) -> StorageResult<()> {
+    pub fn set_pending(&self, object_key: &str, meta: VersionMeta) -> StorageResult<()> {
+        let version = meta.version;
         let ver_key = format!("ver:{object_key}{SEP}{version}");
-        let mut meta_map = metadata;
-        meta_map.insert("last-modified".to_string(), last_modified.clone());
-        let meta = VersionMeta {
-            version,
-            chunk_checksums: chunk_checksums.to_vec(),
-            checksum: checksum_val,
-            status: VersionStatus::Pending,
-            data_size,
-            last_modified,
-            metadata: meta_map,
-        };
-
         let ops = vec![
             (ver_key.clone(), self.serialize_meta(&meta)?),
             (
