@@ -23,6 +23,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace"] }
 md-5 = "0.10"
 quick-xml = { version = "0.36", features = ["serialize"] }
+zstd = "0.13"
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt"]}

@@ -1162,6 +1162,7 @@ mod tests {
             disk_failures: 1,
             metadata_replicas: 0,
             disk_uuids: Vec::new(),
+            compression_level: None,
         }
     }
 

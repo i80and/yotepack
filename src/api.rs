@@ -35,6 +35,10 @@ struct ChunkReadContext<'a> {
     version: u64,
     chunk_checksums: &'a [u128],
     data_size: usize,
+    /// Object format (0=uncompressed, 1=compressed)
+    object_format: u8,
+    /// Compressed size of each chunk
+    compressed_sizes: &'a [u32],
 }
 
 impl ObjectStorage {
@@ -77,6 +81,8 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size,
+            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            compressed_sizes: &meta.compressed_sizes,
         };
 
         Self::for_each_chunk(
@@ -160,6 +166,8 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size,
+            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            compressed_sizes: &meta.compressed_sizes,
         };
 
         Self::for_each_chunk(
@@ -229,6 +237,8 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size: data_size as usize,
+            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            compressed_sizes: &meta.compressed_sizes,
         };
 
         let mut result = Vec::new();
@@ -354,6 +364,8 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size: data_size as usize,
+            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            compressed_sizes: &meta.compressed_sizes,
         };
 
         let mut global_offset = 0u64;
@@ -450,6 +462,14 @@ impl ObjectStorage {
         // Phase 2: Compute final object-level checksum
         let object_checksum = obj_hasher.finalize();
 
+        // Determine compression settings
+        let compression_level = self.config.compression_level;
+        let object_format = if compression_level.is_some() {
+            1u8
+        } else {
+            0u8
+        };
+
         if chunk_data_list.is_empty() {
             // Empty object
             let next_version = self.meta_store.incr_version_counter(object_key)?;
@@ -463,6 +483,8 @@ impl ObjectStorage {
                     data_size: 0,
                     last_modified: String::new(),
                     metadata: std::collections::HashMap::new(),
+                    compression_level,
+                    compressed_sizes: Vec::new(),
                 },
             )?;
             return self
@@ -484,30 +506,31 @@ impl ObjectStorage {
             .disks
             .iter()
             .map(|d| {
-                // Write actual data size of first chunk (for format detection)
-                // Use 0 as format marker for new format (variable-length entries)
-                d.open_write(object_key, next_version, chunk_size, 0)
+                d.open_write(object_key, next_version, chunk_size, object_format)
                     .map(Some)
             })
             .collect::<Result<_, _>>()?;
 
+        // Phase 5: Encode chunks and collect compressed sizes
+        let mut compressed_sizes: Vec<u32> = Vec::with_capacity(chunk_data_list.len());
         for (idx, chunk_data) in chunk_data_list.iter().enumerate() {
             let is_last = idx == chunk_data_list.len() - 1;
-            let (_, _) = self.chunk_store.encode_and_append(
+            let (_, compressed_size) = self.chunk_store.encode_and_append(
                 chunk_data,
                 chunk_size,
                 is_last,
                 &mut handles,
             )?;
+            compressed_sizes.push(compressed_size as u32);
         }
 
-        // Phase 5: Commit all mega-files (atomic rename)
+        // Phase 6: Commit all mega-files (atomic rename)
         for handle in handles {
             let handle = handle.expect("handle should be Some");
             handle.commit_write()?;
         }
 
-        // Phase 6: Set pending + promote in metadata
+        // Phase 7: Set pending + promote in metadata
         self.meta_store.set_pending(
             object_key,
             VersionMeta {
@@ -518,10 +541,12 @@ impl ObjectStorage {
                 data_size,
                 last_modified: String::new(),
                 metadata: std::collections::HashMap::new(),
+                compression_level,
+                compressed_sizes,
             },
         )?;
 
-        // Phase 7: Promote from pending → committed
+        // Phase 8: Promote from pending → committed
         match self.meta_store.promote_version(object_key, next_version) {
             Ok(()) => {}
             Err(StorageError::VersionConflict) => {
@@ -960,20 +985,33 @@ impl ObjectStorage {
                 CHUNK_SIZE_DEFAULT
             };
 
-            let k = self.chunk_store.k;
-            let shard_size = expected_chunk_size.div_ceil(k);
-            let shard_size = shard_size.div_ceil(2) * 2;
-            let entry_size = 24 + shard_size;
+            // Entry format: <cksum:u128><len:u64><data> = 24 bytes header + data
+            // total_per_disk = compressed_sizes[chunk_idx] / num_disks = 24 + shard_size
+            let total_per_disk =
+                ctx.compressed_sizes[chunk_idx] as usize / self.chunk_store.num_disks;
+            let compressed_shard_size = total_per_disk - 24;
+            let _entry_size = 24 + compressed_shard_size;
 
-            let shard_results =
-                self.chunk_store
-                    .read_chunk(ctx.object_key, chunk_idx, entry_size, ctx.version);
+            let shard_results = self.chunk_store.read_chunk(
+                ctx.object_key,
+                chunk_idx,
+                ctx.object_format,
+                ctx.compressed_sizes,
+                ctx.version,
+            );
 
             let (mut chunk_data, corrections) = self.chunk_store.recover_chunk(
                 expected_chunk_cksum,
                 expected_chunk_size,
                 &shard_results,
             )?;
+
+            // Decompress if the object uses compression
+            if ctx.object_format == 1 {
+                chunk_data = zstd::decode_all(chunk_data.as_slice()).map_err(|e| {
+                    StorageError::Transient(format!("zstd decode chunk {chunk_idx}: {e}"))
+                })?;
+            }
 
             // Trim last chunk if it has padding from erasure coding
             if chunk_idx == total_chunks - 1 && chunk_data.len() > expected_chunk_size {

@@ -50,6 +50,7 @@ async fn main() {
         disk_failures: cli.failures,
         metadata_replicas: 0, // 0 = all disks
         disk_uuids: Vec::new(),
+        compression_level: None, // None = no compression
     };
 
     tracing::info!(
@@ -113,6 +114,7 @@ mod tests {
             disk_failures: 1,
             metadata_replicas: 0, // 0 = all disks
             disk_uuids: Vec::new(),
+            compression_level: None,
         }
     }
 

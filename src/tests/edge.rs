@@ -30,7 +30,6 @@ fn edge_single_shard_bitrot() {
     assert_eq!(result, data);
 
     // Corrupt one segment in the mega-file on disk 0
-    // With M=1, K=2, N=3: shard_size = 1024/2 = 512, segment = 16+8+512 = 536
     let meta = storage
         .meta_store
         .read_version_by_number("bitrot", token)
@@ -43,8 +42,12 @@ fn edge_single_shard_bitrot() {
     let mega_path = segments_dir.join(format!("v{:08}", token));
     let mut mega_data = std::fs::read(&mega_path).unwrap();
 
-    // Corrupt chunk 0's shard on disk 0 (flip a bit in the data area)
-    mega_data[28] ^= 0xFF; // Flip a bit in the first data byte
+    // Entry format: <cksum:u128><len:u64><data> = 24 bytes header + data
+    // Data starts at offset 4 (file header) + 24 (entry header) = 28
+    let data_offset = 28;
+
+    // Corrupt first byte of shard data
+    mega_data[data_offset] ^= 0xFF;
     std::fs::write(&mega_path, mega_data).unwrap();
 
     // Reading should still succeed (erasure coding recovers the shard)
@@ -70,15 +73,21 @@ fn edge_shard_zeroed() {
     assert_eq!(result, data);
 
     // Zero out the first chunk's shard on disk 0
-    // Chunk 0 data starts at mega-file offset 28 (4-byte header + 24-byte segment header)
+    let meta = storage
+        .meta_store
+        .read_version_by_number("zeroed", token)
+        .unwrap();
+    let total_per_disk = meta.compressed_sizes[0] as usize / storage.chunk_store.num_disks;
+    let shard_size = total_per_disk - 24; // Remove 24-byte entry header
+
     let disk_path = &storage.chunk_store.disks[0].path;
     let mega_path = disk_path
         .join("segments")
         .join("zeroed")
         .join(format!("v{:08}", token));
     let mut mega_data = std::fs::read(&mega_path).unwrap();
-    // Segment 0 data starts at offset 28, size 512 bytes
-    for i in 0..512 {
+    // Shard 0 data starts at offset 4 (header) + 24 (entry header) = 28
+    for i in 0..shard_size {
         mega_data[28 + i] = 0;
     }
     std::fs::write(&mega_path, mega_data).unwrap();
@@ -132,15 +141,21 @@ fn edge_shard_missing() {
     assert_eq!(result, data);
 
     // "Delete" the first chunk's shard on disk 0 by zeroing its segment
-    // This makes the segment checksum mismatch, triggering erasure recovery
+    let meta = storage
+        .meta_store
+        .read_version_by_number("missing", token)
+        .unwrap();
+    let total_per_disk = meta.compressed_sizes[0] as usize / storage.chunk_store.num_disks;
+    let shard_size = total_per_disk - 24;
+
     let disk_path = &storage.chunk_store.disks[0].path;
     let mega_path = disk_path
         .join("segments")
         .join("missing")
         .join(format!("v{:08}", token));
     let mut mega_data = std::fs::read(&mega_path).unwrap();
-    // Zero out the first chunk's segment data (offset 28, size 512)
-    for i in 0..512 {
+    // Zero out shard 0 data (offset 4 header + 24 entry header = 28)
+    for i in 0..shard_size {
         mega_data[28 + i] = 0;
     }
     std::fs::write(&mega_path, mega_data).unwrap();
@@ -169,8 +184,13 @@ fn edge_two_shard_failures_recovered() {
     assert_eq!(result, data);
 
     // Corrupt first chunk's segments on disk 0 and disk 1
-    // With M=2, K=3, N=5:
-    //   shard_size = 1024/3 = 342, even -> 342, segment = 16+8+342 = 366
+    let meta = storage
+        .meta_store
+        .read_version_by_number("two-fail", token)
+        .unwrap();
+    let total_per_disk = meta.compressed_sizes[0] as usize / storage.chunk_store.num_disks;
+    let shard_size = total_per_disk - 24;
+
     for disk_idx in 0..2 {
         let disk_path = &storage.chunk_store.disks[disk_idx].path;
         let mega_path = disk_path
@@ -178,8 +198,8 @@ fn edge_two_shard_failures_recovered() {
             .join("two-fail")
             .join(format!("v{:08}", token));
         let mut mega_data = std::fs::read(&mega_path).unwrap();
-        // Corrupt chunk 0's segment (data starts at offset 28, size 342)
-        for i in 0..342 {
+        // Corrupt shard 0 data (offset 4 header + 24 entry header = 28)
+        for i in 0..shard_size {
             mega_data[28 + i] ^= 0xFF;
         }
         std::fs::write(&mega_path, mega_data).unwrap();
@@ -498,6 +518,7 @@ fn edge_cluster_id_explicit_config() {
         disk_failures: 1,
         metadata_replicas: 0,
         disk_uuids: Vec::new(),
+        compression_level: None,
     };
     let storage1 = ObjectStorage::new(config1).unwrap();
 
@@ -519,6 +540,7 @@ fn edge_cluster_id_explicit_config() {
         disk_failures: 1,
         metadata_replicas: 0,
         disk_uuids: uuids.clone(),
+        compression_level: None,
     };
     let storage2 = ObjectStorage::new(config2).unwrap();
 
@@ -573,6 +595,7 @@ fn edge_cluster_id_mismatch_rejected() {
         disk_failures: 1,
         metadata_replicas: 0,
         disk_uuids: uuids,
+        compression_level: None,
     };
 
     // Should fail with ClusterIdMismatch
@@ -600,6 +623,7 @@ fn edge_cluster_id_count_mismatch_rejected() {
         disk_failures: config.disk_failures,
         metadata_replicas: config.metadata_replicas,
         disk_uuids: vec![uuid::Uuid::new_v4().to_string()], // 1 instead of 3
+        compression_level: None,
     };
 
     let result = ObjectStorage::new(config_bad);

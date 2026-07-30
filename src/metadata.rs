@@ -187,7 +187,14 @@ impl ReplicatedMetaStore {
         let meta_json = serde_json::to_string(&meta.metadata)
             .map_err(|e| StorageError::KvError(format!("serialize metadata: {e}")))?;
         let meta_json_len = meta_json.len();
-        let mut buf = Vec::with_capacity(41 + meta.chunk_checksums.len() * 16 + 4 + meta_json_len);
+        let mut buf = Vec::with_capacity(
+            41 + meta.chunk_checksums.len() * 16
+                + 4
+                + meta_json_len
+                + 1
+                + 4
+                + meta.compressed_sizes.len() * 4,
+        );
         buf.extend_from_slice(&meta.version.to_le_bytes());
         buf.push(meta.status.to_u8());
         buf.extend_from_slice(&meta.checksum.to_le_bytes());
@@ -200,6 +207,18 @@ impl ReplicatedMetaStore {
         // Metadata: length-prefixed JSON (always present in new format)
         buf.extend_from_slice(&(meta_json_len as u32).to_le_bytes());
         buf.extend_from_slice(meta_json.as_bytes());
+        // New fields: compression_level + compressed_sizes (appended at end for backward compat)
+        // compression_level: 0xFF = None, otherwise level + 1 (since levels are >= 1)
+        let enc_level = match meta.compression_level {
+            Some(l) => (l + 1) as u8,
+            None => 0xFF,
+        };
+        buf.push(enc_level);
+        // compressed_sizes: count (u32) + per-chunk sizes (u32 each)
+        buf.extend_from_slice(&(meta.compressed_sizes.len() as u32).to_le_bytes());
+        for &sz in &meta.compressed_sizes {
+            buf.extend_from_slice(&sz.to_le_bytes());
+        }
         Ok(buf)
     }
 
@@ -240,7 +259,7 @@ impl ReplicatedMetaStore {
 
         // Parse metadata: length-prefixed JSON at the end of the record.
         let meta_checksums_end = 41 + chunk_checksums.len() * 16;
-        let metadata = if bytes.len() >= meta_checksums_end + 4 {
+        let (metadata, json_len) = if bytes.len() >= meta_checksums_end + 4 {
             let meta_len = u32::from_le_bytes(
                 bytes[meta_checksums_end..meta_checksums_end + 4]
                     .try_into()
@@ -248,7 +267,8 @@ impl ReplicatedMetaStore {
             ) as usize;
             let json_start = meta_checksums_end + 4;
             let json_end = json_start + meta_len;
-            if meta_len == 0 || (json_start <= bytes.len() && json_end <= bytes.len()) {
+            let parsed = if meta_len == 0 || (json_start <= bytes.len() && json_end <= bytes.len())
+            {
                 if meta_len > 0 {
                     serde_json::from_slice(&bytes[json_start..json_end]).unwrap_or_default()
                 } else {
@@ -256,9 +276,39 @@ impl ReplicatedMetaStore {
                 }
             } else {
                 std::collections::HashMap::new()
-            }
+            };
+            (parsed, meta_len)
         } else {
-            std::collections::HashMap::new()
+            (std::collections::HashMap::new(), 0)
+        };
+
+        // Parse optional new fields (backward compatible: only if extra bytes present after JSON)
+        let new_fields_start = meta_checksums_end + 4 + json_len;
+        let (compression_level, compressed_sizes) = if new_fields_start + 5 <= bytes.len() {
+            let enc_level = bytes[new_fields_start];
+            let level = if enc_level == 0xFF {
+                None
+            } else {
+                Some(enc_level as i32 - 1)
+            };
+            let sizes_count = u32::from_le_bytes(
+                bytes[new_fields_start + 1..new_fields_start + 5]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let sizes_end = new_fields_start + 5 + sizes_count * 4;
+            let sizes = if bytes.len() >= sizes_end && sizes_count > 0 {
+                bytes[new_fields_start + 5..sizes_end]
+                    .chunks(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (level, sizes)
+        } else {
+            // Old format: no new fields
+            (None, Vec::new())
         };
 
         Ok(VersionMeta {
@@ -269,6 +319,8 @@ impl ReplicatedMetaStore {
             data_size,
             last_modified: metadata.get("last-modified").cloned().unwrap_or_default(),
             metadata,
+            compression_level,
+            compressed_sizes,
         })
     }
 

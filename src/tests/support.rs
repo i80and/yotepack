@@ -32,5 +32,6 @@ pub fn make_test_config(tmp: &TempDir, disk_failures: u32, metadata_replicas: us
         disk_failures,
         metadata_replicas,
         disk_uuids: Vec::new(),
+        compression_level: None,
     }
 }

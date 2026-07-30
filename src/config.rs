@@ -13,6 +13,8 @@ pub struct Config {
     /// Empty list means "generate UUIDs for all disks" (fresh cluster).
     /// Non-empty list must match `disk_paths.len()` in length.
     pub disk_uuids: Vec<String>,
+    /// Zstd compression level. None = no compression.
+    pub compression_level: Option<i32>,
 }
 
 impl Config {
