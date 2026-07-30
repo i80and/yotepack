@@ -748,6 +748,11 @@ async fn put_object(
         Err(e) => return error_to_response(e),
     };
 
+    // Persist Content-Type as object metadata for GET/HEAD responses
+    if let Some(ref ct) = content_type {
+        let _ = state.storage.set_content_type(&object_key, ct);
+    }
+
     // Calculate ETag as MD5 of the body
     let mut hasher = Md5::new();
     hasher.update(&body);
@@ -830,6 +835,9 @@ async fn get_object(
         };
         let total_size = meta.data_size as u64;
 
+        // Clone for later use in headers (after the move into the spawn)
+        let ct_key = object_key.clone();
+
         // Spawn the streaming range read
         let storage_arc = Arc::clone(&state.storage);
         let object_key = object_key.clone();
@@ -863,7 +871,7 @@ async fn get_object(
         );
         headers_map.insert("accept-ranges", "bytes".parse().unwrap());
         headers_map.insert("etag", etag.parse().unwrap());
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
+        if let Ok(ref dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
             headers_map.insert(
                 "last-modified",
                 dt.format("%a, %d %b %Y %H:%M:%S GMT")
@@ -871,6 +879,9 @@ async fn get_object(
                     .parse()
                     .unwrap(),
             );
+        }
+        if let Some(ct) = state.storage.get_content_type(&ct_key).unwrap_or(None) {
+            headers_map.insert("content-type", ct.parse().unwrap());
         }
 
         let body = Body::from_stream(ReceiverStream { rx });
@@ -910,7 +921,7 @@ async fn get_object(
     headers_map.insert("content-length", data_size.to_string().parse().unwrap());
     headers_map.insert("etag", etag.parse().unwrap());
     headers_map.insert("accept-ranges", "bytes".parse().unwrap());
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
+    if let Ok(ref dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
         headers_map.insert(
             "last-modified",
             dt.format("%a, %d %b %Y %H:%M:%S GMT")
@@ -918,6 +929,9 @@ async fn get_object(
                 .parse()
                 .unwrap(),
         );
+    }
+    if let Ok(Some(ct)) = state.storage.get_content_type(&object_key) {
+        headers_map.insert("content-type", ct.parse().unwrap());
     }
 
     let body = Body::from_stream(ReceiverStream { rx });
@@ -982,7 +996,7 @@ async fn head_object(
     let mut headers = HeaderMap::new();
     headers.insert("content-length", data_size.to_string().parse().unwrap());
     headers.insert("etag", etag.parse().unwrap());
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
+    if let Ok(ref dt) = chrono::DateTime::parse_from_rfc3339(&meta.last_modified) {
         headers.insert(
             "last-modified",
             dt.format("%a, %d %b %Y %H:%M:%S GMT")
@@ -990,6 +1004,9 @@ async fn head_object(
                 .parse()
                 .unwrap(),
         );
+    }
+    if let Ok(Some(ct)) = state.storage.get_content_type(&object_key) {
+        headers.insert("content-type", ct.parse().unwrap());
     }
 
     // HEAD returns headers but no body
