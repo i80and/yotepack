@@ -56,7 +56,7 @@ fn prop_read_after_write() {
         let storage = ObjectStorage::new(config).unwrap();
 
         let key = "rainw-key";
-        let token = rt().block_on(storage.put(key, &data)).unwrap();
+        let token = rt().block_on(storage.put(key, &data, None)).unwrap();
         assert!(token > 0);
 
         let result = rt().block_on(storage.get(key, Some(token))).unwrap();
@@ -76,7 +76,7 @@ fn prop_read_after_write_many_keys() {
             .enumerate()
             .map(|(i, k)| {
                 let data = format!("data-{i}").into_bytes();
-                rt().block_on(storage.put(k, &data))
+                rt().block_on(storage.put(k, &data, None))
             })
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -104,7 +104,7 @@ fn prop_version_monotonicity() {
         let mut prev_version = 0u64;
         for _i in 0..count {
             let data = vec![prev_version as u8; 64];
-            let version = rt().block_on(storage.put("mono-key", &data)).unwrap();
+            let version = rt().block_on(storage.put("mono-key", &data, None)).unwrap();
             assert!(
                 version > prev_version,
                 "version {version} should be > {prev_version}"
@@ -135,7 +135,7 @@ fn prop_chunk_data_consistency() {
                 .map(|j| ((i * 3 + j * 7) % 256) as u8)
                 .collect();
             let key = format!("chunkdata-{i}");
-            let token = rt().block_on(storage.put(&key, &data)).unwrap();
+            let token = rt().block_on(storage.put(&key, &data, None)).unwrap();
             expected.push((key, data, token));
         }
 
@@ -199,7 +199,7 @@ fn prop_checksum_consistency() {
             let data: Vec<u8> = (0..(64 + i * 32))
                 .map(|j| ((i * 7 + j * 13) % 256) as u8)
                 .collect();
-            let token = rt().block_on(storage.put(&format!("cksum-{i}"), &data)).unwrap();
+            let token = rt().block_on(storage.put(&format!("cksum-{i}"), &data, None)).unwrap();
             let meta = storage.meta_store.read_version_by_number(&format!("cksum-{i}"), token).unwrap();
 
             // Read data back
@@ -231,7 +231,7 @@ fn prop_no_ghost_data_after_gc() {
         // Write and delete objects
         for i in 0..count {
             let data = vec![i as u8; 64];
-            let _token = rt().block_on(storage.put(&format!("gc-ghost-{i}"), &data)).unwrap();
+            let _token = rt().block_on(storage.put(&format!("gc-ghost-{i}"), &data, None)).unwrap();
             // chunk_ids removed — no longer tracking per-chunk identifiers
             storage.delete(&format!("gc-ghost-{i}")).unwrap();
         }
@@ -271,7 +271,7 @@ fn prop_version_conflict_resolved() {
         let mut versions: Vec<u64> = Vec::new();
         for i in 0..count {
             let data = format!("v{i}").into_bytes();
-            match rt().block_on(storage.put("conflict-key", &data)) {
+            match rt().block_on(storage.put("conflict-key", &data, None)) {
                 Ok(token) => versions.push(token),
                 Err(StorageError::VersionConflict) => {
                     // Another write won — verify the version we get is correct
@@ -317,7 +317,7 @@ fn prop_list_consistency() {
         for i in 0..count {
             let data = vec![i as u8; 32 + (i % 5) * 32];
             let key = format!("list-key-{i}");
-            let token = rt().block_on(storage.put(&key, &data)).unwrap();
+            let token = rt().block_on(storage.put(&key, &data, None)).unwrap();
             objects.push((key, token));
         }
 
@@ -354,7 +354,7 @@ fn prop_read_your_writes_multiple_versions() {
         let mut tokens: Vec<u64> = Vec::new();
         for i in 0..versions {
             let data = format!("v{i}").into_bytes();
-            let token = rt().block_on(storage.put("multi-v", &data)).unwrap();
+            let token = rt().block_on(storage.put("multi-v", &data, None)).unwrap();
             tokens.push(token);
 
             // Read-with-token must return the exact data we just wrote
@@ -383,7 +383,7 @@ fn prop_read_after_write_multi_chunk() {
         let storage = ObjectStorage::new(config).unwrap();
 
         let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        let token = rt().block_on(storage.put("multi-chunk-key", &data)).unwrap();
+        let token = rt().block_on(storage.put("multi-chunk-key", &data, None)).unwrap();
 
         // Read with token
         let result = rt().block_on(storage.get("multi-chunk-key", Some(token))).unwrap();
@@ -409,7 +409,7 @@ fn prop_byte_range_requests() {
         let storage = ObjectStorage::new(config).unwrap();
 
         let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        rt().block_on(storage.put("range-key", &data)).unwrap();
+        rt().block_on(storage.put("range-key", &data, None)).unwrap();
         let data_size = data.len();
 
         // Test ranges: full, middle, start, end, cross-chunk boundary
@@ -479,7 +479,7 @@ fn prop_crud_lifecycle() {
             let data = vec![i as u8; 32];
 
             // PUT
-            let token = rt().block_on(storage.put(&key, &data)).unwrap();
+            let token = rt().block_on(storage.put(&key, &data, None)).unwrap();
             objects.push((key.clone(), token));
 
             // GET with token
@@ -573,7 +573,7 @@ fn prop_random_operation_sequence() {
         for op in ops {
             match op {
                 FuzzOp::Put { key, data } => {
-                    let result = rt().block_on(storage.put(&key, &data));
+                    let result = rt().block_on(storage.put(&key, &data, None));
                     // PUT may succeed or fail (conflict), both are valid
                     let _ = result;
                 }

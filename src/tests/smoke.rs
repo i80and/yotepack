@@ -27,7 +27,7 @@ fn smoke_put_get_basic() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data = b"Hello, erasure-coded world!";
-    let token = rt().block_on(storage.put("test-key", data)).unwrap();
+    let token = rt().block_on(storage.put("test-key", data, None)).unwrap();
     assert!(token > 0);
 
     let result = rt().block_on(storage.get("test-key", Some(token))).unwrap();
@@ -44,7 +44,7 @@ fn smoke_put_get_multiple_objects() {
     let tokens: Vec<u64> = (0..10)
         .map(|i| {
             let data = format!("object-{i}").into_bytes();
-            rt().block_on(storage.put(&format!("key-{i}"), &data))
+            rt().block_on(storage.put(&format!("key-{i}"), &data, None))
                 .unwrap()
         })
         .collect();
@@ -64,7 +64,7 @@ fn smoke_put_get_no_token() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("key", b"data")).unwrap();
+    rt().block_on(storage.put("key", b"data", None)).unwrap();
 
     // Read without token (read-committed)
     let result = rt().block_on(storage.get("key", None)).unwrap();
@@ -77,8 +77,8 @@ fn smoke_read_latest_version() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    let _v1 = rt().block_on(storage.put("key", b"v1")).unwrap();
-    let v2 = rt().block_on(storage.put("key", b"v2")).unwrap();
+    let _v1 = rt().block_on(storage.put("key", b"v1", None)).unwrap();
+    let v2 = rt().block_on(storage.put("key", b"v2", None)).unwrap();
 
     // read_latest_version should return the newest
     let latest = storage.meta_store.read_latest_version("key").unwrap();
@@ -101,8 +101,8 @@ fn smoke_version_concurrency() {
     let storage = ObjectStorage::new(config).unwrap();
 
     // Two PUTs to same key — one should win
-    let v1 = rt().block_on(storage.put("key", b"first")).unwrap();
-    let v2 = rt().block_on(storage.put("key", b"second")).unwrap();
+    let v1 = rt().block_on(storage.put("key", b"first", None)).unwrap();
+    let v2 = rt().block_on(storage.put("key", b"second", None)).unwrap();
 
     assert!(v2 > v1);
 
@@ -125,7 +125,7 @@ fn smoke_version_monotonicity() {
     let mut prev_version = 0u64;
     for i in 0..5 {
         let data = format!("version-{i}").into_bytes();
-        let version = rt().block_on(storage.put("mono-key", &data)).unwrap();
+        let version = rt().block_on(storage.put("mono-key", &data, None)).unwrap();
         assert!(
             version > prev_version,
             "version {version} should be > {prev_version}"
@@ -140,7 +140,7 @@ fn smoke_delete() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("key", b"data")).unwrap();
+    rt().block_on(storage.put("key", b"data", None)).unwrap();
 
     // Delete
     storage.delete("key").unwrap();
@@ -171,9 +171,12 @@ fn smoke_list_basic() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("obj-a", b"data-a")).unwrap();
-    rt().block_on(storage.put("obj-b", b"data-b")).unwrap();
-    rt().block_on(storage.put("other", b"data-other")).unwrap();
+    rt().block_on(storage.put("obj-a", b"data-a", None))
+        .unwrap();
+    rt().block_on(storage.put("obj-b", b"data-b", None))
+        .unwrap();
+    rt().block_on(storage.put("other", b"data-other", None))
+        .unwrap();
 
     let entries = storage.list("", None, 100).unwrap();
     assert_eq!(entries.len(), 3);
@@ -192,9 +195,11 @@ fn smoke_list_prefix_filter() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("alpha-1", b"data")).unwrap();
-    rt().block_on(storage.put("alpha-2", b"data")).unwrap();
-    rt().block_on(storage.put("beta-1", b"data")).unwrap();
+    rt().block_on(storage.put("alpha-1", b"data", None))
+        .unwrap();
+    rt().block_on(storage.put("alpha-2", b"data", None))
+        .unwrap();
+    rt().block_on(storage.put("beta-1", b"data", None)).unwrap();
 
     let entries = storage.list("alpha", None, 100).unwrap();
     assert_eq!(entries.len(), 2);
@@ -207,7 +212,7 @@ fn smoke_list_limit() {
     let storage = ObjectStorage::new(config).unwrap();
 
     for i in 0..10 {
-        rt().block_on(storage.put(&format!("obj-{i}"), b"data"))
+        rt().block_on(storage.put(&format!("obj-{i}"), b"data", None))
             .unwrap();
     }
 
@@ -227,7 +232,7 @@ fn smoke_large_object() {
 
     // Data larger than chunk size (1 KiB) to trigger multiple chunks
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("large", &data)).unwrap();
+    let token = rt().block_on(storage.put("large", &data, None)).unwrap();
     let result = rt().block_on(storage.get("large", Some(token))).unwrap();
     assert_eq!(result, data);
 }
@@ -240,7 +245,7 @@ fn smoke_exact_chunk_boundary() {
 
     // Exactly one chunk size
     let data = vec![42u8; 1024];
-    let token = rt().block_on(storage.put("exact", &data)).unwrap();
+    let token = rt().block_on(storage.put("exact", &data, None)).unwrap();
     let result = rt().block_on(storage.get("exact", Some(token))).unwrap();
     assert_eq!(result, data);
 }
@@ -253,7 +258,7 @@ fn smoke_just_over_chunk_boundary() {
 
     // Just over one chunk — triggers two chunks
     let data = vec![42u8; 1025];
-    let token = rt().block_on(storage.put("over", &data)).unwrap();
+    let token = rt().block_on(storage.put("over", &data, None)).unwrap();
     let result = rt().block_on(storage.get("over", Some(token))).unwrap();
     assert_eq!(result, data);
 }
@@ -280,7 +285,7 @@ fn smoke_meta_persist() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("persist-key", b"persist-data"))
+    rt().block_on(storage.put("persist-key", b"persist-data", None))
         .unwrap();
 
     // Persist all metadata databases (verify it doesn't error)
@@ -298,7 +303,7 @@ fn smoke_gc_removes_unreferenced() {
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write, delete, then GC
-    rt().block_on(storage.put("gc-key", b"data")).unwrap();
+    rt().block_on(storage.put("gc-key", b"data", None)).unwrap();
     storage.delete("gc-key").unwrap();
     storage.garbage_collect().unwrap();
 
@@ -319,7 +324,7 @@ fn smoke_startup_recovery() {
     // Write and commit an object
     {
         let storage = ObjectStorage::new(config.clone()).unwrap();
-        rt().block_on(storage.put("recover-key", b"recover-data"))
+        rt().block_on(storage.put("recover-key", b"recover-data", None))
             .unwrap();
     }
 

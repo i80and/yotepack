@@ -320,6 +320,7 @@ impl ReplicatedMetaStore {
             last_modified: metadata.get("last-modified").cloned().unwrap_or_default(),
             metadata,
             compression_level,
+            object_format: 0, // Old format versions had no compression
             compressed_sizes,
         })
     }

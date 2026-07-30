@@ -23,7 +23,7 @@ fn edge_single_shard_bitrot() {
 
     // Write an object
     let data: Vec<u8> = (0..4096).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("bitrot", &data)).unwrap();
+    let token = rt().block_on(storage.put("bitrot", &data, None)).unwrap();
 
     // Read back successfully
     let result = rt().block_on(storage.get("bitrot", Some(token))).unwrap();
@@ -66,7 +66,7 @@ fn edge_shard_zeroed() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| (i % 256) as u8).collect();
-    let token = rt().block_on(storage.put("zeroed", &data)).unwrap();
+    let token = rt().block_on(storage.put("zeroed", &data, None)).unwrap();
 
     // Read back works
     let result = rt().block_on(storage.get("zeroed", Some(token))).unwrap();
@@ -104,7 +104,7 @@ fn edge_shard_truncated() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("trunc", &data)).unwrap();
+    let token = rt().block_on(storage.put("trunc", &data, None)).unwrap();
 
     let result = rt().block_on(storage.get("trunc", Some(token))).unwrap();
     assert_eq!(result, data);
@@ -135,7 +135,7 @@ fn edge_shard_missing() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..2048).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("missing", &data)).unwrap();
+    let token = rt().block_on(storage.put("missing", &data, None)).unwrap();
 
     let result = rt().block_on(storage.get("missing", Some(token))).unwrap();
     assert_eq!(result, data);
@@ -177,7 +177,7 @@ fn edge_two_shard_failures_recovered() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("two-fail", &data)).unwrap();
+    let token = rt().block_on(storage.put("two-fail", &data, None)).unwrap();
 
     // Verify initial read works
     let result = rt().block_on(storage.get("two-fail", Some(token))).unwrap();
@@ -218,7 +218,7 @@ fn edge_three_shard_failures_exceeds_tolerance() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..8192).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("too-many", &data)).unwrap();
+    let token = rt().block_on(storage.put("too-many", &data, None)).unwrap();
 
     // Corrupt first chunk's segments on disks 0, 1, and 2
     // With M=2, K=3, N=5, shard_size = 1024/3 = 342
@@ -252,7 +252,7 @@ fn edge_metadata_disk_io_failure() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data = b"meta-fail-test";
-    let token = rt().block_on(storage.put("meta-key", data)).unwrap();
+    let token = rt().block_on(storage.put("meta-key", data, None)).unwrap();
 
     // Write succeeds
     let result = rt().block_on(storage.get("meta-key", Some(token))).unwrap();
@@ -279,7 +279,7 @@ fn edge_pending_version_without_shards() {
     // Write and commit first object
     {
         let storage = ObjectStorage::new(config.clone()).unwrap();
-        rt().block_on(storage.put("clean", b"data")).unwrap();
+        rt().block_on(storage.put("clean", b"data", None)).unwrap();
     }
 
     // On restart, cleanup should work
@@ -302,7 +302,7 @@ fn edge_multiple_pending_versions() {
         let storage = ObjectStorage::new(config.clone()).unwrap();
         for i in 0..5 {
             let data = format!("obj-{i}").into_bytes();
-            rt().block_on(storage.put(&format!("key-{i}"), &data))
+            rt().block_on(storage.put(&format!("key-{i}"), &data, None))
                 .unwrap();
         }
     }
@@ -333,7 +333,8 @@ fn edge_gc_after_partial_writes() {
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write and commit
-    rt().block_on(storage.put("gc-partial", b"data")).unwrap();
+    rt().block_on(storage.put("gc-partial", b"data", None))
+        .unwrap();
 
     // GC should not error
     let result = storage.garbage_collect();
@@ -362,7 +363,7 @@ fn edge_gc_delete_then_recreate() {
     let storage = ObjectStorage::new(config).unwrap();
 
     // Write, delete, GC, then write again
-    rt().block_on(storage.put("recreate", b"v1")).unwrap();
+    rt().block_on(storage.put("recreate", b"v1", None)).unwrap();
     storage.delete("recreate").unwrap();
     storage.garbage_collect().unwrap();
 
@@ -370,7 +371,7 @@ fn edge_gc_delete_then_recreate() {
     assert_eq!(entries.len(), 0);
 
     // Recreate with new data
-    rt().block_on(storage.put("recreate", b"v2")).unwrap();
+    rt().block_on(storage.put("recreate", b"v2", None)).unwrap();
     let entries = storage.list("", None, 100).unwrap();
     assert_eq!(entries.len(), 1);
 
@@ -392,7 +393,9 @@ fn edge_rapid_concurrent_writes_same_key() {
     let mut last_version = 0u64;
     for i in 0..20 {
         let data = format!("rapid-{i}").into_bytes();
-        let version = rt().block_on(storage.put("rapid-key", &data)).unwrap();
+        let version = rt()
+            .block_on(storage.put("rapid-key", &data, None))
+            .unwrap();
         assert!(version > last_version, "v{version} > v{last_version}");
         last_version = version;
 
@@ -418,7 +421,9 @@ fn edge_version_number_stress() {
     let mut prev = 0u64;
     // Write enough versions that we stress the counter
     for _ in 0..100 {
-        let version = rt().block_on(storage.put("counter-test", b"x")).unwrap();
+        let version = rt()
+            .block_on(storage.put("counter-test", b"x", None))
+            .unwrap();
         assert!(version > prev);
         prev = version;
     }
@@ -439,7 +444,7 @@ fn edge_single_byte_object() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data = vec![0xFFu8];
-    let token = rt().block_on(storage.put("tiny", &data)).unwrap();
+    let token = rt().block_on(storage.put("tiny", &data, None)).unwrap();
     let result = rt().block_on(storage.get("tiny", Some(token))).unwrap();
     assert_eq!(result, data);
 }
@@ -451,7 +456,9 @@ fn edge_null_byte_object() {
     let storage = ObjectStorage::new(config).unwrap();
 
     let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
-    let token = rt().block_on(storage.put("all-bytes", &data)).unwrap();
+    let token = rt()
+        .block_on(storage.put("all-bytes", &data, None))
+        .unwrap();
     let result = rt()
         .block_on(storage.get("all-bytes", Some(token)))
         .unwrap();
@@ -466,7 +473,7 @@ fn edge_repeated_data() {
 
     // 1024 copies of the same byte — tests erasure coding on highly redundant data
     let data = vec![0xABu8; 4096];
-    let token = rt().block_on(storage.put("repeated", &data)).unwrap();
+    let token = rt().block_on(storage.put("repeated", &data, None)).unwrap();
     let result = rt().block_on(storage.get("repeated", Some(token))).unwrap();
     assert_eq!(result, data);
 }
@@ -495,7 +502,8 @@ fn edge_cluster_id_fresh_generation() {
     }
 
     // Storage should still work
-    rt().block_on(storage.put("fresh-obj", b"data")).unwrap();
+    rt().block_on(storage.put("fresh-obj", b"data", None))
+        .unwrap();
     let result = rt().block_on(storage.get("fresh-obj", None)).unwrap();
     assert_eq!(result, b"data");
 }
@@ -649,7 +657,7 @@ fn edge_empty_key_rejected() {
     let storage = ObjectStorage::new(config).unwrap();
 
     // PUT with empty key should fail
-    let result = rt().block_on(storage.put("", b"data"));
+    let result = rt().block_on(storage.put("", b"data", None));
     assert!(
         result.is_err(),
         "PUT with empty key should be rejected, got: {result:?}"

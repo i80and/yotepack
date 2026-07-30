@@ -14,7 +14,75 @@ pub struct Config {
     /// Non-empty list must match `disk_paths.len()` in length.
     pub disk_uuids: Vec<String>,
     /// Zstd compression level. None = no compression.
+    /// When Some, compression is still gated by MIME type (text-like types compress, binary types don't).
     pub compression_level: Option<i32>,
+}
+
+/// MIME types (and prefixes) that are known to be compressible.
+/// Already-compressed formats (images, audio, video, archives) are deliberately excluded.
+/// Keys are matched as prefix or full MIME type against incoming Content-Type headers.
+pub static COMPRESSIBLE_MIME_PREFIXES: &[&str] = &[
+    // Text-based formats
+    "text/",
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/xhtml",
+    "application/sql",
+    "application/csv",
+    "application/x-yaml",
+    "application/toml",
+    "application/xml-external-parsed-entity",
+    "application/manifest+json",
+    "application/rtf",
+    "application/graphql",
+    "application/x-httpd-php",
+    "application/x-web-app-manifest+json",
+    // Source code
+    "application/x-sh",
+    "application/x-shellscript",
+    "application/x-python",
+    "application/x-ruby",
+    // Data interchange
+    "application/ld+json",
+    "application/atom+json",
+    "application/hal+json",
+    "application/vnd.api+json",
+    // Markup
+    "text/html",
+    "text/css",
+    "text/plain",
+    "text/markdown",
+    "text/xml",
+    "text/csv",
+    // Mail
+    "text/calendar",
+    "message/rfc822",
+];
+
+/// Check whether a Content-Type should be compressed.
+/// Returns true if:
+/// 1. `compression_level` is Some (global compression is enabled), AND
+/// 2. The content type matches one of the compressible prefixes
+pub fn should_compress(content_type: Option<&str>, compression_level: Option<i32>) -> bool {
+    let level = match compression_level {
+        Some(l) => l,
+        None => return false, // Global compression disabled
+    };
+
+    // Level 0 means "no compression" even if Some is set
+    if level <= 0 {
+        return false;
+    }
+
+    let mime = match content_type {
+        Some(ct) => ct.trim(),
+        None => return false, // No content type — don't compress unknowns
+    };
+
+    COMPRESSIBLE_MIME_PREFIXES
+        .iter()
+        .any(|prefix| mime.starts_with(prefix))
 }
 
 impl Config {

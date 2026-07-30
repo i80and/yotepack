@@ -714,6 +714,7 @@ async fn list_objects(
 async fn put_object(
     state: State<S3AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
     req: axum::extract::Request,
 ) -> Response {
     // Validate bucket name
@@ -731,8 +732,18 @@ async fn put_object(
     // Build full object key (bucket/key prefix for namespacing)
     let object_key = format!("{bucket}/{key}");
 
+    // Extract Content-Type for adaptive compression decision
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // Store the object
-    let token = match state.storage.put(&object_key, &body).await {
+    let token = match state
+        .storage
+        .put(&object_key, &body, content_type.as_deref())
+        .await
+    {
         Ok(t) => t,
         Err(e) => return error_to_response(e),
     };

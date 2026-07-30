@@ -26,7 +26,7 @@ fn test_last_modified_is_set_on_put() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("key", b"data")).unwrap();
+    rt().block_on(storage.put("key", b"data", None)).unwrap();
 
     // Read version metadata — should have a non-empty last_modified
     let meta = storage.meta_store.read_version("key").unwrap();
@@ -61,7 +61,7 @@ fn test_last_modified_empty_object() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("empty-key", b"")).unwrap();
+    rt().block_on(storage.put("empty-key", b"", None)).unwrap();
 
     let meta = storage.meta_store.read_version("empty-key").unwrap();
     assert!(
@@ -80,7 +80,7 @@ fn test_last_modified_persists() {
     // Write and commit an object, then drop the storage
     let time1: String = {
         let storage = ObjectStorage::new(config.clone()).unwrap();
-        rt().block_on(storage.put("persist-key", b"persist-data"))
+        rt().block_on(storage.put("persist-key", b"persist-data", None))
             .unwrap();
         let meta1 = storage.meta_store.read_version("persist-key").unwrap();
         let time = meta1.last_modified.clone();
@@ -111,7 +111,7 @@ fn test_last_modified_new_version_different() {
     let storage = ObjectStorage::new(config).unwrap();
 
     // First version
-    let v1 = rt().block_on(storage.put("key", b"v1")).unwrap();
+    let v1 = rt().block_on(storage.put("key", b"v1", None)).unwrap();
     let meta1 = storage.meta_store.read_version("key").unwrap();
     assert_eq!(meta1.version, v1);
     let time1 = meta1.last_modified.clone();
@@ -119,7 +119,7 @@ fn test_last_modified_new_version_different() {
     // Small delay, then second version
     std::thread::sleep(Duration::from_millis(50));
 
-    let v2 = rt().block_on(storage.put("key", b"v2")).unwrap();
+    let v2 = rt().block_on(storage.put("key", b"v2", None)).unwrap();
     let meta2 = storage.meta_store.read_version("key").unwrap();
     assert_eq!(meta2.version, v2);
     let time2 = meta2.last_modified.clone();
@@ -137,7 +137,7 @@ fn test_last_modified_updated_on_metadata_change() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("key", b"data")).unwrap();
+    rt().block_on(storage.put("key", b"data", None)).unwrap();
     let meta1 = storage.meta_store.read_version("key").unwrap();
     let time1 = meta1.last_modified.clone();
 
@@ -171,7 +171,7 @@ fn test_last_modified_in_list_response() {
 
     let keys = vec!["obj-x-a", "obj-x-b"];
     for key in &keys {
-        rt().block_on(storage.put(key, b"data")).unwrap();
+        rt().block_on(storage.put(key, b"data", None)).unwrap();
     }
 
     let entries = storage.list("", None, 100).unwrap();
@@ -197,7 +197,7 @@ fn test_last_modified_version_metadata_stored_in_hashmap() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("key", b"data")).unwrap();
+    rt().block_on(storage.put("key", b"data", None)).unwrap();
 
     let meta = storage.meta_store.read_version("key").unwrap();
 
@@ -220,7 +220,7 @@ fn test_last_modified_status_is_committed() {
     let config = support::make_test_config(&tmp, 1, 0);
     let storage = ObjectStorage::new(config).unwrap();
 
-    rt().block_on(storage.put("key", b"data")).unwrap();
+    rt().block_on(storage.put("key", b"data", None)).unwrap();
 
     let meta = storage.meta_store.read_version("key").unwrap();
 

@@ -57,9 +57,12 @@ pub struct VersionMeta {
     /// Arbitrary user-defined metadata (e.g., Content-Type, ACL, custom headers).
     /// Keys are lowercase; values may be any string.
     pub metadata: std::collections::HashMap<String, String>,
-    /// Compression level used (None = uncompressed). Stored for round-trip consistency.
+    /// Compression level requested (None = no compression). Stored for round-trip consistency.
     pub compression_level: Option<i32>,
-    /// Compressed size of each chunk in bytes (only valid when compression_level is Some).
+    /// Actual object format used (0 = uncompressed, 1 = zstd compressed).
+    /// This is computed at write time based on compression_level AND Content-Type.
+    pub object_format: u8,
+    /// Compressed size of each chunk in bytes (only valid when object_format == 1).
     pub compressed_sizes: Vec<u32>,
 }
 

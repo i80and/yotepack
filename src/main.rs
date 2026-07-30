@@ -125,7 +125,7 @@ mod tests {
         let storage = ObjectStorage::new(config).unwrap();
 
         let data = b"Hello, erasure-coded world!";
-        let token = storage.put("test-key", data).await.unwrap();
+        let token = storage.put("test-key", data, None).await.unwrap();
         let result = storage.get("test-key", Some(token)).await.unwrap();
 
         assert_eq!(result, data);
@@ -139,7 +139,7 @@ mod tests {
 
         // Create data larger than chunk size to trigger multiple chunks
         let data: Vec<u8> = (0..10240).map(|i| (i % 256) as u8).collect();
-        let token = storage.put("large-key", &data).await.unwrap();
+        let token = storage.put("large-key", &data, None).await.unwrap();
         let result = storage.get("large-key", Some(token)).await.unwrap();
 
         assert_eq!(result, data);
@@ -152,14 +152,14 @@ mod tests {
         let storage = ObjectStorage::new(config).unwrap();
 
         // Write first version
-        let token1 = storage.put("key", b"version1").await.unwrap();
+        let token1 = storage.put("key", b"version1", None).await.unwrap();
 
         // Read without token (read-committed)
         let result = storage.get("key", None).await.unwrap();
         assert_eq!(result, b"version1");
 
         // Write second version
-        let _token2 = storage.put("key", b"version2").await.unwrap();
+        let _token2 = storage.put("key", b"version2", None).await.unwrap();
 
         // Read without token should see latest
         let result = storage.get("key", None).await.unwrap();
@@ -176,7 +176,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("key", b"data").await.unwrap();
+        storage.put("key", b"data", None).await.unwrap();
         storage.delete("key").unwrap();
 
         // After delete, reading should fail
@@ -190,9 +190,9 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("obj1", b"data1").await.unwrap();
-        storage.put("obj2", b"data2").await.unwrap();
-        storage.put("other", b"data3").await.unwrap();
+        storage.put("obj1", b"data1", None).await.unwrap();
+        storage.put("obj2", b"data2", None).await.unwrap();
+        storage.put("other", b"data3", None).await.unwrap();
 
         let entries = storage.list("", None, 100).unwrap();
         // Should only show committed objects with data
@@ -207,7 +207,7 @@ mod tests {
 
         // Test with data that spans multiple chunks
         let data: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
-        let token = storage.put("multi-chunk", &data).await.unwrap();
+        let token = storage.put("multi-chunk", &data, None).await.unwrap();
         let result = storage.get("multi-chunk", Some(token)).await.unwrap();
         assert_eq!(result, data);
     }
@@ -218,7 +218,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("key", b"data").await.unwrap();
+        storage.put("key", b"data", None).await.unwrap();
 
         // Set metadata
         storage
@@ -240,7 +240,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("img.png", b"image data").await.unwrap();
+        storage.put("img.png", b"image data", None).await.unwrap();
 
         // Set content type
         storage.set_content_type("img.png", "image/png").unwrap();
@@ -260,7 +260,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("file.txt", b"text data").await.unwrap();
+        storage.put("file.txt", b"text data", None).await.unwrap();
 
         // Set cache control
         storage
@@ -278,7 +278,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("private.txt", b"secret").await.unwrap();
+        storage.put("private.txt", b"secret", None).await.unwrap();
 
         // Set ACL (private)
         let acl = serde_json::json!({ "grants": [{"user": "admin", "permission": "WRITE"}]});
@@ -300,7 +300,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("key", b"data").await.unwrap();
+        storage.put("key", b"data", None).await.unwrap();
 
         // Set metadata with mixed case
         storage
@@ -321,7 +321,7 @@ mod tests {
         let config = make_test_config(&tmp);
         let storage = ObjectStorage::new(config).unwrap();
 
-        storage.put("key", b"data").await.unwrap();
+        storage.put("key", b"data", None).await.unwrap();
         storage
             .set_metadata_value("key", "custom", "value123")
             .unwrap();

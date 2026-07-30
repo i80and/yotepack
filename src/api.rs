@@ -6,7 +6,7 @@ use futures::io::Cursor;
 use futures::AsyncReadExt;
 
 use crate::checksum::{per_chunk_checksum, StreamingObjectHash};
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::disk::{ChunkStore, VersionMeta, VersionStatus};
 use crate::errors::{StorageError, StorageResult};
 
@@ -81,7 +81,7 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size,
-            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            object_format: meta.object_format,
             compressed_sizes: &meta.compressed_sizes,
         };
 
@@ -166,7 +166,7 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size,
-            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            object_format: meta.object_format,
             compressed_sizes: &meta.compressed_sizes,
         };
 
@@ -237,7 +237,7 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size: data_size as usize,
-            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            object_format: meta.object_format,
             compressed_sizes: &meta.compressed_sizes,
         };
 
@@ -364,7 +364,7 @@ impl ObjectStorage {
             version,
             chunk_checksums: &meta.chunk_checksums,
             data_size: data_size as usize,
-            object_format: meta.compression_level.map(|_| 1u8).unwrap_or(0u8),
+            object_format: meta.object_format,
             compressed_sizes: &meta.compressed_sizes,
         };
 
@@ -412,7 +412,12 @@ impl ObjectStorage {
     // PUT(object_key, data: &[u8]) -> (version_token, error)
     // -------------------------------------------------------------------------
 
-    pub async fn put(&self, object_key: &str, data: &[u8]) -> StorageResult<u64> {
+    pub async fn put(
+        &self,
+        object_key: &str,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> StorageResult<u64> {
         if object_key.is_empty() {
             return Err(StorageError::NotFound(
                 "object key cannot be empty".to_string(),
@@ -420,7 +425,7 @@ impl ObjectStorage {
         }
 
         let mut cursor = Cursor::new(data.to_vec());
-        self.put_stream(object_key, &mut cursor).await
+        self.put_stream(object_key, &mut cursor, content_type).await
     }
 
     // -------------------------------------------------------------------------
@@ -435,6 +440,7 @@ impl ObjectStorage {
         &self,
         object_key: &str,
         reader: &mut R,
+        content_type: Option<&str>,
     ) -> StorageResult<u64> {
         let chunk_size = CHUNK_SIZE_DEFAULT as u32;
         let mut buf = vec![0u8; CHUNK_SIZE_DEFAULT];
@@ -462,13 +468,10 @@ impl ObjectStorage {
         // Phase 2: Compute final object-level checksum
         let object_checksum = obj_hasher.finalize();
 
-        // Determine compression settings
+        // Determine compression settings: adaptive per-content-type
         let compression_level = self.config.compression_level;
-        let object_format = if compression_level.is_some() {
-            1u8
-        } else {
-            0u8
-        };
+        let should_compress = config::should_compress(content_type, compression_level);
+        let object_format = if should_compress { 1u8 } else { 0u8 };
 
         if chunk_data_list.is_empty() {
             // Empty object
@@ -484,6 +487,7 @@ impl ObjectStorage {
                     last_modified: String::new(),
                     metadata: std::collections::HashMap::new(),
                     compression_level,
+                    object_format,
                     compressed_sizes: Vec::new(),
                 },
             )?;
@@ -542,6 +546,7 @@ impl ObjectStorage {
                 last_modified: String::new(),
                 metadata: std::collections::HashMap::new(),
                 compression_level,
+                object_format,
                 compressed_sizes,
             },
         )?;
